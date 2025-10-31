@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.linear_model import Ridge
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+import xgboost as xgb
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import datetime
 import plotly.graph_objects as go
@@ -60,10 +59,6 @@ st.divider()
 with st.sidebar:
     st.header("⚙️ Configuration")
     uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
-    model_choice = st.selectbox(
-        "Select Model",
-        ["Ridge Regression", "Random Forest", "Gradient Boosting", "Ensemble"]
-    )
     show_metrics = st.checkbox("Show Model Metrics", True)
     show_predictions = st.checkbox("Show Predictions", True)
 
@@ -180,53 +175,33 @@ X_train, X_test = X_scaled[:split], X_scaled[split:]
 y_train, y_test = y_scaled[:split], y_scaled[split:]
 y_train_orig, y_test_orig = y.iloc[:split], y.iloc[split:]
 
-# ===== TRAIN MODELS =====
+# ===== TRAIN MODEL =====
 @st.cache_resource
-def train_models(X_train, y_train):
-    """Train all models and return them"""
-    with st.spinner("⚙️ Training models..."):
-        ridge = Ridge(alpha=10)
-        ridge.fit(X_train, y_train)
-        
-        rf = RandomForestRegressor(
-            n_estimators=150,
-            max_depth=20,
-            min_samples_split=5,
-            random_state=42,
-            n_jobs=-1
-        )
-        rf.fit(X_train, y_train)
-        
-        gb = GradientBoostingRegressor(
+def train_model(X_train, y_train):
+    """Train XGBoost model and return it"""
+    with st.spinner("⚙️ Training XGBoost model..."):
+        model = xgb.XGBRegressor(
             n_estimators=150,
             learning_rate=0.05,
             max_depth=5,
-            min_samples_split=5,
-            random_state=42
+            min_child_weight=5,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+            n_jobs=-1,
+            verbosity=0
         )
-        gb.fit(X_train, y_train)
+        model.fit(X_train, y_train)
     
-    return ridge, rf, gb
+    return model
 
-ridge, rf, gb = train_models(X_train, y_train)
+model = train_model(X_train, y_train)
 st.success("✅ Training completed!")
 
 # ===== PREDICTION FUNCTION =====
-def predict_model(model_name, X_input):
-    """Make predictions using selected model"""
-    if model_name == "Ridge Regression":
-        return ridge.predict(X_input)
-    elif model_name == "Random Forest":
-        return rf.predict(X_input)
-    elif model_name == "Gradient Boosting":
-        return gb.predict(X_input)
-    else:  # Ensemble
-        preds = np.mean([
-            ridge.predict(X_input),
-            rf.predict(X_input),
-            gb.predict(X_input)
-        ], axis=0)
-        return preds
+def predict_model(X_input):
+    """Make predictions using XGBoost model"""
+    return model.predict(X_input)
 
 # ===== MODEL EVALUATION =====
 if show_metrics:
@@ -234,32 +209,18 @@ if show_metrics:
     st.subheader("📈 Model Evaluation Metrics")
     
     try:
-        preds_ridge = ridge.predict(X_test)
-        preds_rf = rf.predict(X_test)
-        preds_gb = gb.predict(X_test)
-        preds_ensemble = np.mean([preds_ridge, preds_rf, preds_gb], axis=0)
+        preds = predict_model(X_test)
         
         # Calculate metrics
+        mae = mean_absolute_error(y_test, preds)
+        rmse = np.sqrt(mean_squared_error(y_test, preds))
+        r2 = r2_score(y_test, preds)
+        
         metrics_data = {
-            "Model": ["Ridge", "Random Forest", "Gradient Boosting", "Ensemble"],
-            "MAE": [
-                mean_absolute_error(y_test, preds_ridge),
-                mean_absolute_error(y_test, preds_rf),
-                mean_absolute_error(y_test, preds_gb),
-                mean_absolute_error(y_test, preds_ensemble)
-            ],
-            "RMSE": [
-                np.sqrt(mean_squared_error(y_test, preds_ridge)),
-                np.sqrt(mean_squared_error(y_test, preds_rf)),
-                np.sqrt(mean_squared_error(y_test, preds_gb)),
-                np.sqrt(mean_squared_error(y_test, preds_ensemble))
-            ],
-            "R²": [
-                r2_score(y_test, preds_ridge),
-                r2_score(y_test, preds_rf),
-                r2_score(y_test, preds_gb),
-                r2_score(y_test, preds_ensemble)
-            ]
+            "Model": ["XGBoost"],
+            "MAE": [mae],
+            "RMSE": [rmse],
+            "R²": [r2]
         }
         
         metrics_df = pd.DataFrame(metrics_data)
@@ -278,10 +239,10 @@ if show_metrics:
 # ===== TEST PREDICTIONS VISUALIZATION =====
 if show_predictions:
     st.divider()
-    st.subheader(f"📉 {model_choice} — Test Predictions vs Actual")
+    st.subheader("📉 XGBoost — Test Predictions vs Actual")
     
     try:
-        preds_scaled = predict_model(model_choice, X_test)
+        preds_scaled = predict_model(X_test)
         preds_actual = scaler_y.inverse_transform(
             preds_scaled.reshape(-1, 1)
         ).flatten()
@@ -304,7 +265,7 @@ if show_predictions:
         ))
         
         fig.update_layout(
-            title=f"{model_choice} — Test Set Predictions",
+            title="XGBoost — Test Set Predictions",
             xaxis_title="Time Period",
             yaxis_title="Bitcoin Price (USD)",
             height=450,
@@ -351,7 +312,7 @@ if forecast_btn:
             X_future = scaler_X.transform(last_row)
             
             # Make prediction
-            pred_scaled = predict_model(model_choice, X_future)
+            pred_scaled = predict_model(X_future)
             pred_price = scaler_y.inverse_transform(
                 pred_scaled.reshape(-1, 1)
             ).flatten()[0]
@@ -371,7 +332,7 @@ if forecast_btn:
                     <h2>${pred_price:,.2f}</h2>
                     <p>on {future_date.strftime('%B %d, %Y')}</p>
                     <hr>
-                    <p><strong>Model:</strong> {model_choice}</p>
+                    <p><strong>Model:</strong> XGBoost</p>
                 </div>
                 """, unsafe_allow_html=True)
             
