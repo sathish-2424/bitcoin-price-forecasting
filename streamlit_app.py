@@ -8,6 +8,7 @@ import datetime
 import plotly.graph_objects as go
 import warnings
 
+# Suppress specific warnings for cleaner UI
 warnings.filterwarnings("ignore")
 
 # ===== PAGE CONFIGURATION =====
@@ -62,29 +63,38 @@ load_css()
 # ===== DATA FUNCTIONS (LIVE) =====
 @st.cache_data(ttl=3600)
 def load_live_data():
-    """Fetches live data from Yahoo Finance (BTC-USD)."""
+    """Fetches live data from Yahoo Finance (BTC-USD) with robust cleaning."""
     try:
         ticker = "BTC-USD"
+        # Download data
         df = yf.download(ticker, period="5y", interval="1d", progress=False)
+        
+        # 1. Handle MultiIndex Columns (YFinance Update Fix)
+        if isinstance(df.columns, pd.MultiIndex):
+            # Flatten columns: If tuple, take the first element (Price Type)
+            df.columns = [col[0] for col in df.columns]
+        
+        # 2. Reset Index to make Date a column
         df = df.reset_index()
         
-        # Robust Column Handling
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-            
-        cols_map = {col: col.lower() for col in df.columns}
-        df.rename(columns=cols_map, inplace=True)
+        # 3. Normalize Column Names
+        df.columns = [c.lower() for c in df.columns]
         
-        if 'datetime' in df.columns:
+        # 4. Ensure Date Column Exists
+        if 'date' not in df.columns and 'datetime' in df.columns:
             df.rename(columns={'datetime': 'date'}, inplace=True)
-        
+            
+        # 5. Filter for Close Price
         if 'close' not in df.columns:
-             return None
+            st.error("API returned data without 'Close' price.")
+            return None
 
         df = df[['date', 'close']].rename(columns={'close': 'price'})
         
+        # 6. Type Conversion
         df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
         df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        
         df = df.dropna().sort_values("date").reset_index(drop=True)
         
         return df
@@ -96,11 +106,15 @@ def load_live_data():
 def feature_engineering(data):
     """Calculates technical indicators."""
     df_temp = data.copy()
+    
+    # Technical Indicators
     df_temp["lag_1"] = df_temp["price"].shift(1)
     df_temp["lag_7"] = df_temp["price"].shift(7)
     df_temp["ma_7"] = df_temp["price"].rolling(window=7).mean()
     df_temp["ma_30"] = df_temp["price"].rolling(window=30).mean()
     df_temp["volatility"] = df_temp["price"].rolling(window=7).std()
+    
+    # Drop NaN values created by lags/rolling
     return df_temp.dropna()
 
 def analyze_forecast_topic(start_price, end_price, path_data):
@@ -124,7 +138,7 @@ def analyze_forecast_topic(start_price, end_price, path_data):
 # ===== MODEL FUNCTIONS =====
 @st.cache_resource
 def train_model(X, y):
-    """Trains the XGBoost model with optimized defaults."""
+    """Trains the XGBoost model."""
     model = xgb.XGBRegressor(
         n_estimators=500,     
         learning_rate=0.01,   
@@ -145,13 +159,18 @@ with st.spinner("Connecting to live market data..."):
     df = load_live_data()
 
 if df is None or df.empty:
-    st.error("Could not fetch data. Please check your internet connection.")
+    st.warning("No data available. Attempting to reload usually fixes this.")
+    if st.button("Reload Data"):
+        st.experimental_rerun()
     st.stop()
 
 # 2. Features & Scaling
 df_feat = feature_engineering(df)
 X_raw = df_feat.drop(columns=["date", "price"], errors="ignore")
 y_raw = df_feat["price"]
+
+# Save column order for later use in recursion
+feature_columns = X_raw.columns.tolist()
 
 # Split
 split_idx = int(0.95 * len(X_raw))
@@ -214,8 +233,8 @@ with tab3:
     if st.button("▶ Run Simulation", type="primary"):
         with st.spinner(f"Simulating market from {last_date} to {target_date}..."):
             
-            # Recursive Logic
-            window_buffer = 40 
+            # Recursive Logic Setup
+            window_buffer = 60  # Increased buffer to ensure rolling windows don't result in empty DFs
             curr_df = df.copy().tail(window_buffer) 
             future_preds = []
             loop_date = last_date + datetime.timedelta(days=1)
@@ -225,29 +244,46 @@ with tab3:
             
             for i in range(total_days):
                 try:
-                    # 1. Feature Engineering
+                    # 1. Feature Engineering on current window
                     f_df = feature_engineering(curr_df)
-                    if f_df.empty: break
                     
-                    last_row = f_df.iloc[-1].drop(["date", "price"], errors="ignore")
+                    if f_df.empty:
+                        st.error("Insufficient data buffer for feature calculation.")
+                        break
                     
-                    # 2. Predict
-                    X_in = scaler_X.transform(last_row.values.reshape(1, -1))
+                    # Get the very last row (the "today" to predict "tomorrow")
+                    last_row = f_df.iloc[-1]
+                    
+                    # 2. Extract strictly the feature columns used in training
+                    # This ensures order matches X_train columns exactly
+                    input_features = last_row[feature_columns]
+                    
+                    # 3. Scale & Predict
+                    X_in = scaler_X.transform(input_features.values.reshape(1, -1))
                     p_scaled = model.predict(X_in)
+                    
+                    # Inverse scale to get actual price
                     p_price = scaler_y.inverse_transform(p_scaled.reshape(-1, 1))[0][0]
                     
-                    # 3. Append & Shift
-                    new_row = pd.DataFrame({"date": [pd.to_datetime(loop_date)], "price": [p_price]})
+                    # 4. Append Prediction to Data for Next Loop
+                    new_row = pd.DataFrame({
+                        "date": [pd.to_datetime(loop_date)], 
+                        "price": [float(p_price)]
+                    })
+                    
+                    # Use Concat (Append is deprecated)
                     curr_df = pd.concat([curr_df, new_row], ignore_index=True).tail(window_buffer)
                     
                     future_preds.append({"date": loop_date, "price": p_price})
                     loop_date += datetime.timedelta(days=1)
-                    progress.progress((i + 1) / total_days)
+                    progress.progress(min((i + 1) / total_days, 1.0))
+                    
                 except Exception as e:
+                    st.error(f"Simulation stopped at {loop_date}: {e}")
                     break
 
             if future_preds:
-                # Results
+                # Results Processing
                 res_df = pd.DataFrame(future_preds)
                 final_p = res_df["price"].iloc[-1]
                 start_p = df["price"].iloc[-1]
@@ -281,7 +317,7 @@ with tab3:
                 st.write("") 
 
                 fig_fut = go.Figure()
-                hist = df.tail(60)
+                hist = df.tail(90)
                 fig_fut.add_trace(go.Scatter(x=hist["date"], y=hist["price"], name="History", line=dict(color="gray")))
                 fig_fut.add_trace(go.Scatter(x=res_df["date"], y=res_df["price"], name="Forecast", line=dict(color="#F7931A", width=3)))
                 fig_fut.update_layout(title="Projected Trajectory", template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)')
