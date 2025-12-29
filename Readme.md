@@ -1,6 +1,6 @@
 ---
 
-# 📈 Bitcoin Price Prediction Using GRU (Deep Learning)
+# 📈 Bitcoin Price Prediction
 
 ## 🧠 Overview
 
