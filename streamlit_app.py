@@ -26,43 +26,58 @@ PERIOD = "5y"
 LOOKBACK = 60
 FUTURE_DAYS = 14
 
-FEATURES = [
-    "price",
-    "ma_7",
-    "ma_30",
-    "volatility",
-    "rsi"
-]
+FEATURES = ["price", "ma_7", "ma_30", "volatility", "rsi"]
 
-# ================= LOAD & FEATURE ENGINEER =================
+# ================= LOAD DATA =================
 @st.cache_data
 def load_data():
     df = yf.download(TICKER, period=PERIOD, interval=INTERVAL, progress=False)
-    df = df.reset_index()[["Date", "Close"]]
-    df.columns = ["date", "price"]
 
-    # Moving Averages
+    # ===== FIX yfinance column formats =====
+    if isinstance(df.columns, pd.MultiIndex):
+        close_data = df.xs("Close", axis=1, level=0)
+
+        # If Series → convert to DataFrame
+        if isinstance(close_data, pd.Series):
+            df = close_data.to_frame(name="price").reset_index()
+        else:
+            # Already a DataFrame
+            df = close_data.copy()
+            df.columns = ["price"]
+            df = df.reset_index()
+
+        df.rename(columns={"Date": "date", "index": "date"}, inplace=True)
+
+    else:
+        df = df.reset_index()[["Date", "Close"]]
+        df.columns = ["date", "price"]
+
+    # ===== Feature Engineering =====
     df["ma_7"] = df["price"].rolling(7).mean()
     df["ma_30"] = df["price"].rolling(30).mean()
-
-    # Volatility
     df["volatility"] = df["price"].rolling(7).std()
 
-    # RSI (14)
+    # RSI (safe)
     delta = df["price"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean().replace(0, np.nan)
+
     rs = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
+    # Final cleanup
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
+
     return df
+
 
 df = load_data()
 
-# ================= SEQUENCE PREPARATION =================
+# ================= SEQUENCES =================
 def create_sequences(data, lookback):
     X, y = [], []
     for i in range(lookback, len(data)):
@@ -74,7 +89,7 @@ def create_sequences(data, lookback):
 @st.cache_resource
 def train_model(df):
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[FEATURES])
+    scaled = scaler.fit_transform(df[FEATURES].values)
 
     X, y = create_sequences(scaled, LOOKBACK)
 
@@ -90,10 +105,7 @@ def train_model(df):
         Dense(1)
     ])
 
-    model.compile(
-        optimizer="adam",
-        loss="huber"
-    )
+    model.compile(optimizer="adam", loss="huber")
 
     model.fit(
         X_train, y_train,
@@ -108,7 +120,7 @@ def train_model(df):
 
 model, scaler = train_model(df)
 
-# ================= FUTURE FORECAST =================
+# ================= FUTURE PREDICTION =================
 def predict_future(df, model, scaler):
     buffer = df[FEATURES].tail(LOOKBACK).copy()
     future = []
@@ -117,6 +129,7 @@ def predict_future(df, model, scaler):
     for _ in range(FUTURE_DAYS):
         scaled_buf = scaler.transform(buffer.values)
         X_input = scaled_buf.reshape(1, LOOKBACK, len(FEATURES))
+
         pred_scaled = model.predict(X_input, verbose=0)[0][0]
 
         dummy = np.zeros((1, len(FEATURES)))
@@ -125,7 +138,6 @@ def predict_future(df, model, scaler):
 
         last_date += timedelta(days=1)
 
-        # Stable feature propagation
         new_row = buffer.iloc[-1].to_dict()
         new_row["price"] = pred_price
 
@@ -142,24 +154,19 @@ future_df = predict_future(df, model, scaler)
 
 # ================= UI =================
 st.title("📈 Bitcoin Price Prediction")
-st.markdown("---")
 
 last_price = float(df["price"].iloc[-1])
 future_price = float(future_df["predicted_price"].iloc[-1])
 change_pct = ((future_price - last_price) / last_price) * 100
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Last Known Price", f"${last_price:,.0f}")
+c1.metric("Last Price", f"${last_price:,.0f}")
 c2.metric("14-Day Forecast", f"${future_price:,.0f}")
 c3.metric("Expected Change", f"{change_pct:.2f}%")
 
 plot_df = pd.concat([
-    df[["date", "price"]]
-        .rename(columns={"price": "value"})
-        .assign(Type="Actual"),
-    future_df
-        .rename(columns={"predicted_price": "value"})
-        .assign(Type="Forecast")
+    df[["date", "price"]].rename(columns={"price": "value"}).assign(Type="Actual"),
+    future_df.rename(columns={"predicted_price": "value"}).assign(Type="Forecast")
 ])
 
 fig = px.line(
