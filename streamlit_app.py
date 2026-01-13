@@ -30,26 +30,36 @@ FEATURES = ["price", "ma_7", "ma_30", "volatility", "rsi"]
 
 # ================= LOAD DATA =================
 @st.cache_data
+
 def load_data():
     df = yf.download(TICKER, period=PERIOD, interval=INTERVAL, progress=False)
 
-    # Handle yfinance column formats
+    # ===== ROBUST yfinance handling =====
     if isinstance(df.columns, pd.MultiIndex):
-        df = df.xs("Close", axis=1, level=0).to_frame("price")
+        close_data = df.xs("Close", axis=1, level=0)
+
+        # If Series → convert
+        if isinstance(close_data, pd.Series):
+            df = close_data.to_frame(name="price")
+        else:
+            # If DataFrame → rename column
+            df = close_data.copy()
+            df.columns = ["price"]
+
     else:
         df = df[["Close"]].rename(columns={"Close": "price"})
 
+    # Index → column
     df.reset_index(inplace=True)
-    df.rename(columns={"Date": "date"}, inplace=True)
+    df.rename(columns={"Date": "date", "index": "date"}, inplace=True)
 
-    # ================= FEATURES =================
+    # ===== FEATURES =====
     df["ma_7"] = df["price"].rolling(7).mean()
     df["ma_30"] = df["price"].rolling(30).mean()
     df["volatility"] = df["price"].rolling(7).std()
 
-    # ================= RSI (SAFE) =================
+    # ===== RSI (SAFE) =====
     delta = df["price"].diff()
-
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
 
@@ -59,11 +69,12 @@ def load_data():
     rs = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # ================= CLEAN =================
+    # ===== CLEAN =====
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
     return df
+
 
 
 df = load_data()
