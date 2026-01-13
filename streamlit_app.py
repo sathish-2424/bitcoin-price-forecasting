@@ -33,42 +33,33 @@ FEATURES = ["price", "ma_7", "ma_30", "volatility", "rsi"]
 def load_data():
     df = yf.download(TICKER, period=PERIOD, interval=INTERVAL, progress=False)
 
-    # ===== FIX yfinance column formats =====
+    # Handle yfinance column formats
     if isinstance(df.columns, pd.MultiIndex):
-        close_data = df.xs("Close", axis=1, level=0)
-
-        # If Series → convert to DataFrame
-        if isinstance(close_data, pd.Series):
-            df = close_data.to_frame(name="price").reset_index()
-        else:
-            # Already a DataFrame
-            df = close_data.copy()
-            df.columns = ["price"]
-            df = df.reset_index()
-
-        df.rename(columns={"Date": "date", "index": "date"}, inplace=True)
-
+        df = df.xs("Close", axis=1, level=0).to_frame("price")
     else:
-        df = df.reset_index()[["Date", "Close"]]
-        df.columns = ["date", "price"]
+        df = df[["Close"]].rename(columns={"Close": "price"})
 
-    # ===== Feature Engineering =====
+    df.reset_index(inplace=True)
+    df.rename(columns={"Date": "date"}, inplace=True)
+
+    # ================= FEATURES =================
     df["ma_7"] = df["price"].rolling(7).mean()
     df["ma_30"] = df["price"].rolling(30).mean()
     df["volatility"] = df["price"].rolling(7).std()
 
-    # RSI (safe)
+    # ================= RSI (SAFE) =================
     delta = df["price"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
 
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean().replace(0, np.nan)
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+
+    avg_gain = gain.rolling(14, min_periods=14).mean()
+    avg_loss = loss.rolling(14, min_periods=14).mean()
 
     rs = avg_gain / avg_loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # Final cleanup
+    # ================= CLEAN =================
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
@@ -77,23 +68,32 @@ def load_data():
 
 df = load_data()
 
-# ================= SEQUENCES =================
+# ================= SEQUENCE CREATION =================
 def create_sequences(data, lookback):
     X, y = [], []
     for i in range(lookback, len(data)):
         X.append(data[i - lookback:i])
-        y.append(data[i, 0])  # predict price
+        y.append(data[i, 0])
     return np.array(X), np.array(y)
+
 
 # ================= TRAIN MODEL =================
 @st.cache_resource
 def train_model(df):
+    # 🚨 ENSURE CLEAN FEATURES
+    feature_df = df[FEATURES].copy()
+    feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    feature_df.dropna(inplace=True)
+
+    if feature_df.empty:
+        raise ValueError("No valid data after feature cleaning")
+
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[FEATURES].values)
+    scaled = scaler.fit_transform(feature_df.values)
 
     X, y = create_sequences(scaled, LOOKBACK)
 
-    split = int(0.95 * len(X))
+    split = int(len(X) * 0.95)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
 
@@ -108,7 +108,8 @@ def train_model(df):
     model.compile(optimizer="adam", loss="huber")
 
     model.fit(
-        X_train, y_train,
+        X_train,
+        y_train,
         validation_data=(X_test, y_test),
         epochs=50,
         batch_size=32,
@@ -117,6 +118,7 @@ def train_model(df):
     )
 
     return model, scaler
+
 
 model, scaler = train_model(df)
 
@@ -138,7 +140,7 @@ def predict_future(df, model, scaler):
 
         last_date += timedelta(days=1)
 
-        new_row = buffer.iloc[-1].to_dict()
+        new_row = buffer.iloc[-1].copy()
         new_row["price"] = pred_price
 
         buffer = pd.concat([buffer, pd.DataFrame([new_row])]).tail(LOOKBACK)
@@ -149,6 +151,7 @@ def predict_future(df, model, scaler):
         })
 
     return pd.DataFrame(future)
+
 
 future_df = predict_future(df, model, scaler)
 
