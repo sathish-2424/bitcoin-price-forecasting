@@ -91,18 +91,18 @@ def create_sequences(data, lookback):
 # ================= TRAIN MODEL =================
 @st.cache_resource
 def train_model(df):
-    # 🚨 ENSURE CLEAN FEATURES
     feature_df = df[FEATURES].copy()
-    feature_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    feature_df.dropna(inplace=True)
 
-    if feature_df.empty:
-        raise ValueError("No valid data after feature cleaning")
+    if len(feature_df) <= LOOKBACK:
+        raise ValueError("Not enough data to create sequences")
 
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(feature_df.values)
 
     X, y = create_sequences(scaled, LOOKBACK)
+
+    if len(X) == 0:
+        raise ValueError("Sequence creation failed – empty dataset")
 
     split = int(len(X) * 0.95)
     X_train, X_test = X[:split], X[split:]
@@ -130,9 +130,6 @@ def train_model(df):
 
     return model, scaler
 
-
-model, scaler = train_model(df)
-
 # ================= FUTURE PREDICTION =================
 def predict_future(df, model, scaler):
     buffer = df[FEATURES].tail(LOOKBACK).copy()
@@ -145,6 +142,7 @@ def predict_future(df, model, scaler):
 
         pred_scaled = model.predict(X_input, verbose=0)[0][0]
 
+        # Inverse only PRICE
         dummy = np.zeros((1, len(FEATURES)))
         dummy[0, 0] = pred_scaled
         pred_price = scaler.inverse_transform(dummy)[0][0]
@@ -152,19 +150,17 @@ def predict_future(df, model, scaler):
         last_date += timedelta(days=1)
 
         new_row = buffer.iloc[-1].copy()
+        new_row[:] = buffer.iloc[-1].values
         new_row["price"] = pred_price
 
         buffer = pd.concat([buffer, pd.DataFrame([new_row])]).tail(LOOKBACK)
 
         future.append({
             "date": last_date,
-            "predicted_price": pred_price
+            "predicted_price": float(pred_price)
         })
 
     return pd.DataFrame(future)
-
-
-future_df = predict_future(df, model, scaler)
 
 # ================= UI =================
 st.title("📈 Bitcoin Price Prediction")
