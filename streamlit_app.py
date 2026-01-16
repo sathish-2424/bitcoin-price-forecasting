@@ -165,9 +165,14 @@ def predict_future(df, model, scaler):
 # ================= UI =================
 st.title("📈 Bitcoin Price Prediction")
 
-if future_df.empty:
-    st.error("❌ Prediction failed: insufficient historical data.")
+model, scaler = train_model(df)
+
+future_df = predict_future(df, model, scaler)
+
+if future_df is None or future_df.empty:
+    st.error("❌ Prediction failed: insufficient data to forecast.")
     st.stop()
+
 
 last_price = float(df["price"].iloc[-1])
 future_price = float(future_df["predicted_price"].iloc[-1])
