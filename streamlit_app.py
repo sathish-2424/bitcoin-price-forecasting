@@ -210,7 +210,7 @@ def predict_recursive(model, scaler, df, days_ahead):
     return pd.DataFrame(future_predictions)
 
 # ================= UI LAYOUT =================
-st.title("⚡ Bitcoin Price Prediction (Corrected Logic)")
+st.title("⚡ Bitcoin Price Prediction")
 st.markdown("""
 <style>
     .metric-card {
