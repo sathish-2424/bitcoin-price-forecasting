@@ -14,7 +14,7 @@ import warnings
 
 # ================= PAGE CONFIG =================
 st.set_page_config(
-    page_title="Bitcoin Price Prediction",
+    page_title="Bitcoin Price Prediction ",
     layout="wide",
     page_icon="⚡"
 )
