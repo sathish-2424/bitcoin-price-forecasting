@@ -4,12 +4,10 @@ import pandas as pd
 import yfinance as yf
 from datetime import timedelta
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import GRU, Dense, Dropout, Input
 from tensorflow.keras.callbacks import EarlyStopping
 import plotly.express as px
-import plotly.graph_objects as go
 import warnings
 
 # ================= PAGE CONFIG =================
@@ -31,22 +29,20 @@ FEATURES = ["price", "ma_7", "ma_30", "volatility", "rsi"]
 # ================= HELPER: INDICATOR CALCULATION =================
 def add_technical_indicators(df):
     """
-    Optimized technical indicator calculation with vectorized operations.
+    Calculates technical indicators. 
     Refactored into a function so it can be called during the prediction loop
     to prevent 'frozen feature' logic errors.
     """
     df = df.copy()
-    price = df["price"].values  # Use numpy array for faster operations
+    # Moving Averages
+    df["ma_7"] = df["price"].rolling(window=7).mean()
+    df["ma_30"] = df["price"].rolling(window=30).mean()
     
-    # Moving Averages - vectorized
-    df["ma_7"] = pd.Series(price, index=df.index).rolling(window=7, min_periods=1).mean()
-    df["ma_30"] = pd.Series(price, index=df.index).rolling(window=30, min_periods=1).mean()
+    # Volatility
+    df["volatility"] = df["price"].rolling(window=7).std()
     
-    # Volatility - vectorized
-    df["volatility"] = pd.Series(price, index=df.index).rolling(window=7, min_periods=1).std()
-    
-    # RSI Calculation - optimized
-    delta = pd.Series(price, index=df.index).diff()
+    # RSI Calculation
+    delta = df["price"].diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
     
@@ -54,7 +50,7 @@ def add_technical_indicators(df):
     avg_loss = loss.rolling(window=14, min_periods=1).mean()
     
     # Avoid division by zero
-    rs = avg_gain / (avg_loss + 1e-10)
+    rs = avg_gain / (avg_loss + 1e-10)  # Add small epsilon to prevent division by zero
     df["rsi"] = 100 - (100 / (1 + rs))
     df["rsi"] = df["rsi"].fillna(50.0)  # Default RSI to 50 if calculation fails
     
@@ -138,13 +134,12 @@ def create_sequences_vectorized(data, lookback):
 def train_gru_model(df):
     """
     Train GRU model with optimized architecture and callbacks.
-    Returns model, scaler, and evaluation metrics.
     """
     # Prepare Data
     feature_data = df[FEATURES].values
     
     if len(feature_data) < LOOKBACK + 10:
-        return None, None, None
+        return None, None
     
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler.fit_transform(feature_data)
@@ -152,7 +147,7 @@ def train_gru_model(df):
     X, y = create_sequences_vectorized(scaled_data, LOOKBACK)
     
     if len(X) == 0:
-        return None, None, None
+        return None, None
 
     # Split Data (No shuffling for Time Series!)
     split = int(len(X) * 0.9)
@@ -195,7 +190,7 @@ def train_gru_model(df):
         )
     
     # Train model
-    history = model.fit(
+    model.fit(
         X_train, y_train,
         epochs=50,
         batch_size=32,
@@ -204,33 +199,7 @@ def train_gru_model(df):
         verbose=0
     )
     
-    # Calculate evaluation metrics
-    train_pred = model.predict(X_train, verbose=0).flatten()
-    test_pred = model.predict(X_test, verbose=0).flatten()
-    
-    # Inverse transform predictions for metrics
-    price_min = scaler.data_min_[0]
-    price_max = scaler.data_max_[0]
-    
-    train_pred_actual = train_pred * (price_max - price_min) + price_min
-    test_pred_actual = test_pred * (price_max - price_min) + price_min
-    y_train_actual = y_train * (price_max - price_min) + price_min
-    y_test_actual = y_test * (price_max - price_min) + price_min
-    
-    # Calculate metrics
-    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-    
-    metrics = {
-        'train_mae': mean_absolute_error(y_train_actual, train_pred_actual),
-        'test_mae': mean_absolute_error(y_test_actual, test_pred_actual),
-        'train_rmse': np.sqrt(mean_squared_error(y_train_actual, train_pred_actual)),
-        'test_rmse': np.sqrt(mean_squared_error(y_test_actual, test_pred_actual)),
-        'train_r2': r2_score(y_train_actual, train_pred_actual),
-        'test_r2': r2_score(y_test_actual, test_pred_actual),
-        'final_val_loss': history.history['val_loss'][-1] if 'val_loss' in history.history else None
-    }
-    
-    return model, scaler, metrics
+    return model, scaler
 
 # ================= OPTIMIZED PREDICTION LOOP =================
 def predict_recursive(model, scaler, df, days_ahead):
@@ -240,8 +209,7 @@ def predict_recursive(model, scaler, df, days_ahead):
     otherwise the model sees inconsistent data.
     
     Optimizations:
-    - More efficient memory usage (list append instead of DataFrame concat in loop)
-    - Batch prediction where possible
+    - More efficient inverse transform using price scaler
     - Better handling of weekends/holidays
     - Improved feature recalculation
     """
@@ -254,27 +222,27 @@ def predict_recursive(model, scaler, df, days_ahead):
     history_df = df.iloc[-min_history:].copy()
     
     # Extract price min/max from scaler for efficient inverse transform
-    price_min = scaler.data_min_[0]
-    price_max = scaler.data_max_[0]
+    # The scaler was fit on all features, so we need to get the min/max for price (index 0)
+    price_min = scaler.data_min_[0]  # Min value for price feature
+    price_max = scaler.data_max_[0]  # Max value for price feature
     
-    # Pre-allocate lists for better performance
     future_predictions = []
-    future_dates = []
     last_date = pd.to_datetime(df["date"].iloc[-1])
-    
-    # Pre-calculate price range for inverse transform
-    price_range = price_max - price_min
     
     for day in range(days_ahead):
         # A. Recalculate indicators on the CURRENT history
+        # This ensures MA_7 and RSI change as we add predicted prices
         temp_df = add_technical_indicators(history_df)
         
         # B. Get the last LOOKBACK rows of features (ensure no NaN)
         feature_rows = temp_df[FEATURES].tail(LOOKBACK)
         
-        # Check for NaN values and handle them efficiently
+        # Check for NaN values and handle them
         if feature_rows.isna().any().any():
-            feature_rows = feature_rows.ffill().bfill().fillna(0)
+            # Forward fill then backward fill NaN values (using modern pandas syntax)
+            feature_rows = feature_rows.ffill().bfill()
+            # If still NaN, fill with last valid value or 0
+            feature_rows = feature_rows.fillna(0)
         
         valid_features = feature_rows.values
         
@@ -286,96 +254,37 @@ def predict_recursive(model, scaler, df, days_ahead):
         pred_scaled = model.predict(X_input, verbose=0)[0][0]
         
         # E. Inverse Transform - optimized manual calculation
-        pred_price = pred_scaled * price_range + price_min
-        pred_price = max(pred_price, 0.01)  # Ensure price is positive
+        # MinMaxScaler formula: scaled = (x - min) / (max - min)
+        # Inverse: x = scaled * (max - min) + min
+        pred_price = pred_scaled * (price_max - price_min) + price_min
         
-        # F. Handle weekends - skip Saturday/Sunday, move to Monday
+        # Ensure price is positive
+        pred_price = max(pred_price, 0.01)
+        
+        # F. Append to history
+        # Handle weekends - skip Saturday/Sunday, move to Monday
         last_date += timedelta(days=1)
         while last_date.weekday() >= 5:  # Saturday = 5, Sunday = 6
             last_date += timedelta(days=1)
         
-        # G. Append to history using list append (more efficient than DataFrame concat)
-        new_row_dict = {
-            "date": last_date,
-            "price": pred_price,
-            "ma_7": np.nan,
-            "ma_30": np.nan,
-            "volatility": np.nan,
-            "rsi": np.nan
-        }
+        new_row = pd.DataFrame({
+            "date": [last_date],
+            "price": [pred_price],
+            # Fill others with NaN initially, they get recalc'd in next loop step A
+            "ma_7": [np.nan], 
+            "ma_30": [np.nan], 
+            "volatility": [np.nan], 
+            "rsi": [np.nan]
+        })
         
-        # Use pd.concat only once at the end or use list of dicts
-        history_df = pd.concat([
-            history_df,
-            pd.DataFrame([new_row_dict])
-        ], ignore_index=True)
+        history_df = pd.concat([history_df, new_row], ignore_index=True)
         
-        future_predictions.append(pred_price)
-        future_dates.append(last_date)
+        future_predictions.append({
+            "date": last_date, 
+            "predicted_price": pred_price
+        })
     
-    # Create DataFrame once at the end
-    return pd.DataFrame({
-        "date": future_dates,
-        "predicted_price": future_predictions
-    })
-
-# ================= FORECAST ANALYSIS =================
-def analyze_forecast(future_df, historical_df, model_metrics=None):
-    """
-    Comprehensive forecast analysis including:
-    - Trend analysis
-    - Volatility forecast
-    - Confidence intervals
-    - Risk metrics
-    """
-    analysis = {}
-    
-    # Basic statistics
-    analysis['forecast_mean'] = future_df['predicted_price'].mean()
-    analysis['forecast_std'] = future_df['predicted_price'].std()
-    analysis['forecast_min'] = future_df['predicted_price'].min()
-    analysis['forecast_max'] = future_df['predicted_price'].max()
-    
-    # Trend analysis
-    prices = future_df['predicted_price'].values
-    if len(prices) > 1:
-        # Calculate trend (slope)
-        x = np.arange(len(prices))
-        trend_slope = np.polyfit(x, prices, 1)[0]
-        analysis['trend_slope'] = trend_slope
-        analysis['trend_direction'] = 'Bullish' if trend_slope > 0 else 'Bearish' if trend_slope < 0 else 'Neutral'
-        
-        # Price change percentage
-        analysis['total_change_pct'] = ((prices[-1] - prices[0]) / prices[0]) * 100
-        analysis['avg_daily_change_pct'] = analysis['total_change_pct'] / len(prices)
-    
-    # Volatility analysis
-    if len(prices) > 1:
-        returns = np.diff(prices) / prices[:-1]
-        analysis['forecast_volatility'] = np.std(returns) * np.sqrt(252) * 100  # Annualized volatility %
-        analysis['max_drawdown'] = ((prices.max() - prices.min()) / prices.max()) * 100
-    
-    # Confidence intervals (using historical volatility)
-    historical_volatility = historical_df['price'].pct_change().std() * np.sqrt(252) * 100
-    current_price = historical_df['price'].iloc[-1]
-    final_pred = future_df['predicted_price'].iloc[-1]
-    
-    # Simple confidence intervals (assuming normal distribution)
-    days_ahead = len(future_df)
-    std_error = current_price * (historical_volatility / 100) * np.sqrt(days_ahead / 252)
-    
-    analysis['confidence_95_lower'] = final_pred - 1.96 * std_error
-    analysis['confidence_95_upper'] = final_pred + 1.96 * std_error
-    analysis['confidence_68_lower'] = final_pred - std_error
-    analysis['confidence_68_upper'] = final_pred + std_error
-    
-    # Model quality metrics
-    if model_metrics:
-        analysis['model_test_mae'] = model_metrics.get('test_mae', None)
-        analysis['model_test_rmse'] = model_metrics.get('test_rmse', None)
-        analysis['model_test_r2'] = model_metrics.get('test_r2', None)
-    
-    return analysis
+    return pd.DataFrame(future_predictions)
 
 # ================= UI LAYOUT =================
 st.title("⚡ Bitcoin Price Prediction")
@@ -400,62 +309,28 @@ if df.empty:
 
 # 2. Train
 with st.spinner("Training GRU Model (this may take a moment)..."):
-    model, scaler, model_metrics = train_gru_model(df)
+    model, scaler = train_gru_model(df)
 
 if not model:
     st.error("Not enough data to train.")
     st.stop()
 
 # 3. Predict
-with st.spinner("Generating Forecast..."):
-    future_df = predict_recursive(model, scaler, df, FUTURE_DAYS)
+future_df = predict_recursive(model, scaler, df, FUTURE_DAYS)
 
-# 4. Analyze Forecast
-forecast_analysis = analyze_forecast(future_df, df, model_metrics)
-
-# 5. Display Stats
+# 4. Display Stats
 current_price = df["price"].iloc[-1]
 pred_price = future_df["predicted_price"].iloc[-1]
 delta = ((pred_price - current_price) / current_price) * 100
 color = "normal" if delta == 0 else ("inverse" if delta < 0 else "normal")
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3 = st.columns(3)
 col1.metric("Current Price", f"${current_price:,.2f}")
 col2.metric(f"Price in {FUTURE_DAYS} Days", f"${pred_price:,.2f}")
 col3.metric("Projected ROI", f"{delta:+.2f}%", delta_color=color)
-col4.metric("Trend", forecast_analysis.get('trend_direction', 'N/A'))
 
-# 6. Model Performance Metrics
-st.subheader("📊 Model Performance")
-perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
-if model_metrics:
-    perf_col1.metric("Test MAE", f"${model_metrics.get('test_mae', 0):,.2f}")
-    perf_col2.metric("Test RMSE", f"${model_metrics.get('test_rmse', 0):,.2f}")
-    perf_col3.metric("Test R²", f"{model_metrics.get('test_r2', 0):.4f}")
-    perf_col4.metric("Val Loss", f"{model_metrics.get('final_val_loss', 0):.6f}")
-
-# 7. Forecast Analysis
-st.subheader("📈 Forecast Analysis")
-analysis_col1, analysis_col2, analysis_col3, analysis_col4 = st.columns(4)
-analysis_col1.metric("Forecast Volatility", f"{forecast_analysis.get('forecast_volatility', 0):.2f}%")
-analysis_col2.metric("Max Drawdown", f"{forecast_analysis.get('max_drawdown', 0):.2f}%")
-analysis_col3.metric("Total Change", f"{forecast_analysis.get('total_change_pct', 0):+.2f}%")
-analysis_col4.metric("Avg Daily Change", f"{forecast_analysis.get('avg_daily_change_pct', 0):+.2f}%")
-
-# Confidence Intervals
-st.markdown("**Confidence Intervals (Final Price)**")
-conf_col1, conf_col2, conf_col3 = st.columns(3)
-conf_col1.metric("68% CI Lower", f"${forecast_analysis.get('confidence_68_lower', 0):,.2f}")
-conf_col2.metric("Predicted", f"${pred_price:,.2f}")
-conf_col3.metric("68% CI Upper", f"${forecast_analysis.get('confidence_68_upper', 0):,.2f}")
-
-conf_col4, conf_col5, conf_col6 = st.columns(3)
-conf_col4.metric("95% CI Lower", f"${forecast_analysis.get('confidence_95_lower', 0):,.2f}")
-conf_col5.metric("Predicted", f"${pred_price:,.2f}")
-conf_col6.metric("95% CI Upper", f"${forecast_analysis.get('confidence_95_upper', 0):,.2f}")
-
-# 8. Enhanced Visualization with Confidence Intervals
-st.subheader("📉 Forecast Visualization")
+# 5. Visualization
+st.subheader("Forecast Visualization")
 
 # Combine for plotting
 hist_data = df.tail(90)[["date", "price"]].copy()
@@ -466,96 +341,25 @@ fut_data = future_df.copy()
 fut_data["Type"] = "Forecast"
 fut_data.rename(columns={"predicted_price": "Value"}, inplace=True)
 
-# Add confidence intervals to forecast data
-fut_data["CI_68_Lower"] = forecast_analysis.get('confidence_68_lower', fut_data["Value"])
-fut_data["CI_68_Upper"] = forecast_analysis.get('confidence_68_upper', fut_data["Value"])
-fut_data["CI_95_Lower"] = forecast_analysis.get('confidence_95_lower', fut_data["Value"])
-fut_data["CI_95_Upper"] = forecast_analysis.get('confidence_95_upper', fut_data["Value"])
-
 # Add a connecting line (last hist point to first future point)
 connector = pd.DataFrame([{
     "date": hist_data["date"].iloc[-1],
     "Value": hist_data["Value"].iloc[-1],
-    "Type": "Forecast",
-    "CI_68_Lower": hist_data["Value"].iloc[-1],
-    "CI_68_Upper": hist_data["Value"].iloc[-1],
-    "CI_95_Lower": hist_data["Value"].iloc[-1],
-    "CI_95_Upper": hist_data["Value"].iloc[-1]
+    "Type": "Forecast"
 }])
 fut_data = pd.concat([connector, fut_data], ignore_index=True)
 
 plot_df = pd.concat([hist_data, fut_data], ignore_index=True)
 
-# Create enhanced plot with confidence intervals
-fig = go.Figure()
-
-# Add confidence intervals (95%)
-fig.add_trace(go.Scatter(
-    x=plot_df[plot_df["Type"] == "Forecast"]["date"],
-    y=plot_df[plot_df["Type"] == "Forecast"]["CI_95_Upper"],
-    mode='lines',
-    line=dict(width=0),
-    showlegend=False,
-    hoverinfo='skip'
-))
-
-fig.add_trace(go.Scatter(
-    x=plot_df[plot_df["Type"] == "Forecast"]["date"],
-    y=plot_df[plot_df["Type"] == "Forecast"]["CI_95_Lower"],
-    mode='lines',
-    line=dict(width=0),
-    fillcolor='rgba(255, 165, 0, 0.2)',
-    fill='tonexty',
-    name='95% Confidence Interval',
-    hoverinfo='skip'
-))
-
-# Add confidence intervals (68%)
-fig.add_trace(go.Scatter(
-    x=plot_df[plot_df["Type"] == "Forecast"]["date"],
-    y=plot_df[plot_df["Type"] == "Forecast"]["CI_68_Upper"],
-    mode='lines',
-    line=dict(width=0),
-    showlegend=False,
-    hoverinfo='skip'
-))
-
-fig.add_trace(go.Scatter(
-    x=plot_df[plot_df["Type"] == "Forecast"]["date"],
-    y=plot_df[plot_df["Type"] == "Forecast"]["CI_68_Lower"],
-    mode='lines',
-    line=dict(width=0),
-    fillcolor='rgba(255, 165, 0, 0.3)',
-    fill='tonexty',
-    name='68% Confidence Interval',
-    hoverinfo='skip'
-))
-
-# Add historical data
-fig.add_trace(go.Scatter(
-    x=hist_data["date"],
-    y=hist_data["Value"],
-    mode='lines',
-    name='Historical',
-    line=dict(color='cyan', width=2)
-))
-
-# Add forecast data
-fig.add_trace(go.Scatter(
-    x=fut_data["date"],
-    y=fut_data["Value"],
-    mode='lines',
-    name='Forecast',
-    line=dict(color='orange', width=2, dash='dash')
-))
-
-fig.update_layout(
-    title="BTC-USD Price Prediction with Confidence Intervals",
-    xaxis_title="Date",
-    yaxis_title="Price (USD)",
-    hovermode="x unified",
-    legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+fig = px.line(
+    plot_df, 
+    x="date", 
+    y="Value", 
+    color="Type",
+    color_discrete_map={"Historical": "cyan", "Forecast": "orange"},
+    title="BTC-USD Prediction"
 )
+fig.update_layout(xaxis_title="Date", yaxis_title="Price (USD)", hovermode="x unified")
 
 st.plotly_chart(fig, use_container_width=True)
 
