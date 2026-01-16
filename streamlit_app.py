@@ -6,362 +6,317 @@ from datetime import timedelta
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import GRU, Dense, Dropout, Input
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.losses import Huber
+from tensorflow.keras import backend as K
 import plotly.express as px
 import warnings
 
-# ================= PAGE CONFIG =================
-st.set_page_config(
-    page_title="Bitcoin Price Prediction",
-    layout="wide",
-    page_icon="⚡"
-)
 warnings.filterwarnings("ignore")
 
-# ================= CONFIGURATION =================
-TICKER = "BTC-USD"
-PERIOD = "2y" # Reduced for speed in demo, increase for production
-INTERVAL = "1d"
-LOOKBACK = 60
-FUTURE_DAYS = 14
-FEATURES = ["price", "ma_7", "ma_30", "volatility", "rsi"]
+# ================= PAGE CONFIG =================
+st.set_page_config(page_title="BTC Forecast — LogReturn + GRU", layout="wide", page_icon="⚡")
 
-# ================= HELPER: INDICATOR CALCULATION =================
+# ================= DEFAULT CONFIG (tweakable in sidebar) =================
+TICKER = "BTC-USD"
+PERIOD = "2y"
+INTERVAL = "1d"
+
+# Sidebar controls
+st.sidebar.title("Model & Forecast Settings")
+LOOKBACK = st.sidebar.number_input("Lookback (days)", value=30, min_value=5, max_value=180, step=5)
+FUTURE_DAYS = st.sidebar.number_input("Forecast days (business days)", value=14, min_value=1, max_value=60, step=1)
+EPOCHS = st.sidebar.number_input("Epochs", value=40, min_value=1, max_value=500, step=5)
+BATCH_SIZE = st.sidebar.selectbox("Batch size", [16, 32, 64], index=1)
+PERIOD_INPUT = st.sidebar.selectbox("History period", ["1y", "2y", "3y", "5y"], index=1)
+
+# Features used by the model (log_return must be first)
+FEATURES = ["log_return", "ma_7", "ma_30", "volatility", "rsi"]
+
+# ================= TECHNICAL INDICATORS =================
 def add_technical_indicators(df):
-    """
-    Calculates technical indicators. 
-    Refactored into a function so it can be called during the prediction loop
-    to prevent 'frozen feature' logic errors.
-    """
     df = df.copy()
-    # Moving Averages
-    df["ma_7"] = df["price"].rolling(window=7).mean()
-    df["ma_30"] = df["price"].rolling(window=30).mean()
-    
-    # Volatility
-    df["volatility"] = df["price"].rolling(window=7).std()
-    
-    # RSI Calculation
-    delta = df["price"].diff()
+    # Ensure price exists
+    if "price" not in df.columns:
+        raise ValueError("DataFrame must include 'price' column")
+
+    # Moving averages
+    df["ma_7"] = df["price"].rolling(window=7, min_periods=1).mean()
+    df["ma_30"] = df["price"].rolling(window=30, min_periods=1).mean()
+
+    # Volatility (7-day std)
+    df["volatility"] = df["price"].rolling(window=7, min_periods=1).std().fillna(0.0)
+
+    # RSI (14)
+    delta = df["price"].diff().fillna(0.0)
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
-    
     avg_gain = gain.rolling(window=14, min_periods=1).mean()
     avg_loss = loss.rolling(window=14, min_periods=1).mean()
-    
-    # Avoid division by zero
-    rs = avg_gain / (avg_loss + 1e-10)  # Add small epsilon to prevent division by zero
+    rs = avg_gain / (avg_loss + 1e-10)
     df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(50.0)  # Default RSI to 50 if calculation fails
-    
+    df["rsi"] = df["rsi"].fillna(50.0)
+
+    # Log return (target) — computed from price
+    df["log_return"] = np.log(df["price"] / df["price"].shift(1))
+    df["log_return"].fillna(0.0, inplace=True)
+
     return df
 
-# ================= LOAD DATA =================
+# ================= DATA LOADING =================
 @st.cache_data
-def load_data():
-    """
-    Optimized data loading with robust column handling.
-    """
+def load_data(ticker=TICKER, period=PERIOD_INPUT, interval=INTERVAL):
     try:
-        df = yf.download(TICKER, period=PERIOD, interval=INTERVAL, progress=False)
-        
-        # Reset index to make Date a column
-        df.reset_index(inplace=True)
-        
-        # Handle yfinance multi-index columns (common issue in v0.2+)
-        if isinstance(df.columns, pd.MultiIndex):
-            # Flatten columns: 'Close' -> 'price', keep 'Date'
-            try:
-                # Find the Close column dynamically
-                price_col = df["Close"] if "Close" in df.columns else df.iloc[:, 1]
-                if isinstance(price_col, pd.DataFrame):
-                    price_col = price_col.iloc[:, 0] # Take first column if still DF
-            except:
-                price_col = df.iloc[:, 1] # Fallback to 2nd column
-                
-            df_clean = pd.DataFrame({
-                "date": df["Date"].iloc[:, 0] if isinstance(df["Date"], pd.DataFrame) else df["Date"],
-                "price": price_col
-            })
+        raw = yf.download(ticker, period=period, interval=interval, progress=False)
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+        raw = raw.reset_index()
+        # Normalize to 'date' + 'price'
+        if "Close" in raw.columns:
+            df = raw[["Date", "Close"]].rename(columns={"Date": "date", "Close": "price"})
         else:
-            # Standard single index handling
-            df_clean = df[["Date", "Close"]].rename(columns={"Date": "date", "Close": "price"})
-
-        # Ensure numeric
-        df_clean["price"] = pd.to_numeric(df_clean["price"], errors='coerce')
-        
-        # Calculate Features
-        df_clean = add_technical_indicators(df_clean)
-        
-        # Drop NaNs created by rolling windows
-        df_clean.dropna(inplace=True)
-        
-        return df_clean
-        
+            cols = list(raw.columns)
+            df = raw[[cols[0], cols[1]]].rename(columns={cols[0]: "date", cols[1]: "price"})
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df.dropna(subset=["price"], inplace=True)
+        df = add_technical_indicators(df)
+        # drop initial NaNs (if any)
+        df.dropna(inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"Data load error: {e}")
         return pd.DataFrame()
 
-# ================= OPTIMIZED SEQUENCE CREATION =================
-def create_sequences_vectorized(data, lookback):
+# ================= SEQUENCE CREATION (vectorized) =================
+def create_sequences_vectorized(combined_scaled, lookback):
     """
-    Optimized Sequence Generation using numpy array operations.
-    Pre-allocates memory for better performance than list comprehension.
+    combined_scaled: np.ndarray shape (N, F) where first column is scaled target (log_return)
+    returns X (n_samples, lookback, F) and y (n_samples,) where y is next-step scaled target
     """
-    n_samples = len(data) - lookback
-    
-    if n_samples <= 0 or len(data) == 0:
-        # Return empty arrays with correct shape
-        if len(data) > 0:
-            return np.array([]).reshape(0, lookback, data.shape[1]), np.array([])
-        else:
-            return np.array([]).reshape(0, lookback, len(FEATURES)), np.array([])
-    
-    # Pre-allocate arrays for better performance
-    X = np.zeros((n_samples, lookback, data.shape[1]), dtype=data.dtype)
-    
-    # Create sequences - optimized loop with pre-allocation
-    for i in range(n_samples):
-        X[i] = data[i:i+lookback]
-    
-    # Create y (Target - the price of the next day, index 0 is 'price')
-    y = data[lookback:, 0].copy()
-    
+    N = combined_scaled.shape[0]
+    F = combined_scaled.shape[1]
+    if N <= lookback:
+        return np.empty((0, lookback, F), dtype=np.float32), np.empty((0,), dtype=np.float32)
+
+    try:
+        from numpy.lib.stride_tricks import sliding_window_view
+        windows = sliding_window_view(combined_scaled, window_shape=lookback, axis=0)
+        # windows shape: (N - lookback + 1, lookback, F)
+        # we want windows[ : N - lookback ] to align with targets at index lookback: (N - lookback)
+        X = windows[:-1].astype(np.float32)
+    except Exception:
+        # fallback
+        n_samples = N - lookback
+        X = np.zeros((n_samples, lookback, F), dtype=np.float32)
+        for i in range(n_samples):
+            X[i] = combined_scaled[i:i+lookback]
+    # y: scaled target at positions lookback..end
+    y = combined_scaled[lookback:, 0].astype(np.float32)
     return X, y
 
-# ================= TRAIN MODEL =================
+# ================= TRAINING FUNCTION =================
 @st.cache_resource
-def train_gru_model(df):
-    """
-    Train GRU model with optimized architecture and callbacks.
-    """
-    # Prepare Data
-    feature_data = df[FEATURES].values
-    
-    if len(feature_data) < LOOKBACK + 10:
-        return None, None
-    
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled_data = scaler.fit_transform(feature_data)
-    
-    X, y = create_sequences_vectorized(scaled_data, LOOKBACK)
-    
+def train_model(df, lookback=LOOKBACK, epochs=EPOCHS, batch_size=BATCH_SIZE):
+    # Prepare raw arrays
+    feature_df = df[["log_return", "ma_7", "ma_30", "volatility", "rsi"]].copy()
+    if feature_df.shape[0] < lookback + 10:
+        return None, None, None, None
+
+    # Split price/target scaler and other features scaler
+    price_scaler = MinMaxScaler()                # for log_return only
+    feature_scaler = MinMaxScaler()              # for other technicals
+
+    # Fit scalers
+    price_vals = feature_df[["log_return"]].values.astype(np.float32)
+    other_vals = feature_df[["ma_7", "ma_30", "volatility", "rsi"]].values.astype(np.float32)
+
+    price_scaled = price_scaler.fit_transform(price_vals)
+    other_scaled = feature_scaler.fit_transform(other_vals)
+
+    combined_scaled = np.hstack([price_scaled, other_scaled])
+
+    # Create sequences
+    X, y = create_sequences_vectorized(combined_scaled, lookback)
     if len(X) == 0:
-        return None, None
+        return None, None, None, None
 
-    # Split Data (No shuffling for Time Series!)
+    # time-series split (no shuffle)
     split = int(len(X) * 0.9)
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
-    
-    # Build Model with improved architecture
+    X_train, X_val = X[:split], X[split:]
+    y_train, y_val = y[:split], y[split:]
+
+    # clear TF session to reduce memory on reruns
+    K.clear_session()
+
+    # Model (smaller but effective)
     model = Sequential([
-        Input(shape=(LOOKBACK, len(FEATURES))),
-        GRU(128, return_sequences=True, dropout=0.2, recurrent_dropout=0.2),
-        GRU(64, return_sequences=False, dropout=0.2, recurrent_dropout=0.2),
-        Dropout(0.3),
-        Dense(32, activation='relu'),
+        Input(shape=(lookback, combined_scaled.shape[1])),
+        GRU(64, return_sequences=True),
+        GRU(32, return_sequences=False),
         Dropout(0.2),
-        Dense(16, activation='relu'),
-        Dense(1)  # Linear output for regression
+        Dense(32, activation="relu"),
+        Dropout(0.1),
+        Dense(1, activation="linear")
     ])
-    
-    model.compile(
-        optimizer='adam', 
-        loss='mse',
-        metrics=['mae']
-    )
-    
-    # Setup callbacks - use compatible approach for restore_best_weights
-    try:
-        # Try to use restore_best_weights if available (TensorFlow 2.2+)
-        early_stopping = EarlyStopping(
-            monitor='val_loss',
-            patience=7,
-            restore_best_weights=True,
-            verbose=0
-        )
-    except TypeError:
-        # Fallback for older TensorFlow versions
-        early_stopping = EarlyStopping(
-            monitor='val_loss',
-            patience=7,
-            verbose=0
-        )
-    
-    # Train model
-    model.fit(
-        X_train, y_train,
-        epochs=50,
-        batch_size=32,
-        validation_data=(X_test, y_test),
-        callbacks=[early_stopping],
-        verbose=0
-    )
-    
-    return model, scaler
+    model.compile(optimizer="adam", loss=Huber(delta=1.0), metrics=["mae"])
 
-# ================= OPTIMIZED PREDICTION LOOP =================
-def predict_recursive(model, scaler, df, days_ahead):
+    early_stopping = EarlyStopping(monitor="val_loss", patience=7, restore_best_weights=True, verbose=0)
+    reduce_lr = ReduceLROnPlateau(monitor="val_loss", patience=4, factor=0.5, min_lr=1e-6, verbose=0)
+
+    model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs,
+              batch_size=batch_size, callbacks=[early_stopping, reduce_lr], verbose=0)
+
+    return model, price_scaler, feature_scaler, combined_scaled.shape[1]
+
+# ================= RECURSIVE PREDICTION (recalculates indicators each step) =================
+def predict_recursive(model, price_scaler, feature_scaler, df, days_ahead, lookback=LOOKBACK):
     """
-    Optimized recursive prediction with proper feature recalculation.
-    We must RECALCULATE features (MA, RSI) after every predicted price,
-    otherwise the model sees inconsistent data.
-    
-    Optimizations:
-    - More efficient inverse transform using price scaler
-    - Better handling of weekends/holidays
-    - Improved feature recalculation
+    Recursive forecast:
+    - builds inputs from unscaled features each loop
+    - scales log_return separately and other features separately then hstacks
+    - reconstructs price from predicted log return: price_next = last_price * exp(pred_log_return)
     """
-    # Get sufficient history to calculate max rolling window (30)
-    # We need at least LOOKBACK + 30 days of history
-    min_history = LOOKBACK + 40
-    if len(df) < min_history:
-        min_history = len(df)
-    
-    history_df = df.iloc[-min_history:].copy()
-    
-    # Extract price min/max from scaler for efficient inverse transform
-    # The scaler was fit on all features, so we need to get the min/max for price (index 0)
-    price_min = scaler.data_min_[0]  # Min value for price feature
-    price_max = scaler.data_max_[0]  # Max value for price feature
-    
-    future_predictions = []
+    if model is None:
+        return pd.DataFrame()
+
+    # Keep a small history window
+    max_rolling = 30
+    min_history = max(lookback + 5, lookback + max_rolling)
+    history = df.iloc[-min_history:].copy().reset_index(drop=True)
+
+    last_price = float(df["price"].iloc[-1])
+    future_rows = []
     last_date = pd.to_datetime(df["date"].iloc[-1])
-    
-    for day in range(days_ahead):
-        # A. Recalculate indicators on the CURRENT history
-        # This ensures MA_7 and RSI change as we add predicted prices
-        temp_df = add_technical_indicators(history_df)
-        
-        # B. Get the last LOOKBACK rows of features (ensure no NaN)
-        feature_rows = temp_df[FEATURES].tail(LOOKBACK)
-        
-        # Check for NaN values and handle them
-        if feature_rows.isna().any().any():
-            # Forward fill then backward fill NaN values (using modern pandas syntax)
-            feature_rows = feature_rows.ffill().bfill()
-            # If still NaN, fill with last valid value or 0
-            feature_rows = feature_rows.fillna(0)
-        
-        valid_features = feature_rows.values
-        
-        # C. Scale features
-        scaled_input = scaler.transform(valid_features)
-        X_input = scaled_input.reshape(1, LOOKBACK, len(FEATURES))
-        
-        # D. Predict Scaled Price
-        pred_scaled = model.predict(X_input, verbose=0)[0][0]
-        
-        # E. Inverse Transform - optimized manual calculation
-        # MinMaxScaler formula: scaled = (x - min) / (max - min)
-        # Inverse: x = scaled * (max - min) + min
-        pred_price = pred_scaled * (price_max - price_min) + price_min
-        
-        # Ensure price is positive
-        pred_price = max(pred_price, 0.01)
-        
-        # F. Append to history
-        # Handle weekends - skip Saturday/Sunday, move to Monday
-        last_date += timedelta(days=1)
-        while last_date.weekday() >= 5:  # Saturday = 5, Sunday = 6
-            last_date += timedelta(days=1)
-        
-        new_row = pd.DataFrame({
-            "date": [last_date],
-            "price": [pred_price],
-            # Fill others with NaN initially, they get recalc'd in next loop step A
-            "ma_7": [np.nan], 
-            "ma_30": [np.nan], 
-            "volatility": [np.nan], 
-            "rsi": [np.nan]
-        })
-        
-        history_df = pd.concat([history_df, new_row], ignore_index=True)
-        
-        future_predictions.append({
-            "date": last_date, 
-            "predicted_price": pred_price
-        })
-    
-    return pd.DataFrame(future_predictions)
 
-# ================= UI LAYOUT =================
-st.title("⚡ Bitcoin Price Prediction")
-st.markdown("""
-<style>
-    .metric-card {
-        background-color: #262730;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #4F4F4F;
-    }
-</style>
-""", unsafe_allow_html=True)
+    for i in range(days_ahead):
+        # Recalculate indicators on current history
+        temp = add_technical_indicators(history)
 
-# 1. Load
-with st.spinner("Loading Data..."):
-    df = load_data()
+        # Take last lookback rows of raw (unscaled) features
+        feat = temp[FEATURES].tail(lookback).copy()
+
+        # Fill any NaNs sensibly
+        if feat.isna().any().any():
+            feat = feat.ffill().bfill().fillna(0.0)
+
+        # Separate columns for scalers
+        price_col = feat[["log_return"]].values.astype(np.float32)
+        other_cols = feat[["ma_7", "ma_30", "volatility", "rsi"]].values.astype(np.float32)
+
+        # Scale separately and combine
+        price_col_scaled = price_scaler.transform(price_col)
+        other_cols_scaled = feature_scaler.transform(other_cols)
+        scaled_input = np.hstack([price_col_scaled, other_cols_scaled]).astype(np.float32)
+
+        X_input = scaled_input.reshape(1, lookback, scaled_input.shape[1])
+
+        pred_scaled = float(model.predict(X_input, verbose=0)[0][0])
+        # invert scale to get predicted log return
+        pred_log_return = price_scaler.inverse_transform(np.array([[pred_scaled]]))[0][0]
+
+        # reconstruct price
+        pred_price = last_price * float(np.exp(pred_log_return))
+        pred_price = float(max(pred_price, 0.01))
+
+        # advance date skipping weekends
+        next_date = last_date + timedelta(days=1)
+        while next_date.weekday() >= 5:
+            next_date += timedelta(days=1)
+        last_date = next_date
+
+        # append to history for next iteration
+        new_row = {
+            "date": last_date,
+            "price": pred_price,
+            # add log_return so next loop can use it as an input (unscaled)
+            "log_return": pred_log_return,
+            "ma_7": np.nan,
+            "ma_30": np.nan,
+            "volatility": np.nan,
+            "rsi": np.nan
+        }
+        history = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
+        last_price = pred_price
+
+        future_rows.append({"date": last_date, "predicted_price": pred_price, "pred_log_return": pred_log_return})
+
+    return pd.DataFrame(future_rows)
+
+# ================= UI + Run =================
+st.title("⚡ BTC Forecast — Log-Return GRU (Accuracy-focused)")
+
+with st.spinner("Loading historical data..."):
+    df = load_data(period=PERIOD_INPUT)
 
 if df.empty:
-    st.error("Could not load data. Please check connection.")
+    st.error("No data loaded. Try changing the history period or check your connection.")
     st.stop()
 
-# 2. Train
-with st.spinner("Training GRU Model (this may take a moment)..."):
-    model, scaler = train_gru_model(df)
+st.markdown(f"**Data loaded:** {len(df)} rows — last date: {df['date'].iloc[-1].date()} — last price: ${df['price'].iloc[-1]:,.2f}")
 
-if not model:
-    st.error("Not enough data to train.")
+with st.spinner("Training model (this can take a little while)..."):
+    model, price_scaler, feature_scaler, feature_count = train_model(df, lookback=LOOKBACK, epochs=EPOCHS, batch_size=BATCH_SIZE)
+
+if model is None:
+    st.error("Not enough data to train reliably with current settings (increase history or reduce lookback).")
     st.stop()
 
-# 3. Predict
-future_df = predict_recursive(model, scaler, df, FUTURE_DAYS)
+with st.spinner("Generating forecast..."):
+    future_df = predict_recursive(model, price_scaler, feature_scaler, df, days_ahead=FUTURE_DAYS, lookback=LOOKBACK)
 
-# 4. Display Stats
-current_price = df["price"].iloc[-1]
-pred_price = future_df["predicted_price"].iloc[-1]
-delta = ((pred_price - current_price) / current_price) * 100
-color = "normal" if delta == 0 else ("inverse" if delta < 0 else "normal")
+if future_df.empty:
+    st.error("Forecast failed or returned no data.")
+    st.stop()
+
+# Metrics
+current_price = float(df["price"].iloc[-1])
+pred_price = float(future_df["predicted_price"].iloc[-1])
+delta_pct = ((pred_price - current_price) / current_price) * 100.0
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Current Price", f"${current_price:,.2f}")
-col2.metric(f"Price in {FUTURE_DAYS} Days", f"${pred_price:,.2f}")
-col3.metric("Projected ROI", f"{delta:+.2f}%", delta_color=color)
+col2.metric(f"Predicted Price ({FUTURE_DAYS} days)", f"${pred_price:,.2f}")
+col3.metric("Projected change", f"{delta_pct:+.2f}%")
 
-# 5. Visualization
-st.subheader("Forecast Visualization")
-
-# Combine for plotting
-hist_data = df.tail(90)[["date", "price"]].copy()
+# Visualization
+st.subheader("Prediction Chart")
+hist_data = df[["date", "price"]].copy().tail(180).rename(columns={"price": "Value"})
 hist_data["Type"] = "Historical"
-hist_data.rename(columns={"price": "Value"}, inplace=True)
 
-fut_data = future_df.copy()
-fut_data["Type"] = "Forecast"
-fut_data.rename(columns={"predicted_price": "Value"}, inplace=True)
+fut_plot = future_df[["date", "predicted_price"]].copy().rename(columns={"predicted_price": "Value"})
+fut_plot["Type"] = "Forecast"
 
-# Add a connecting line (last hist point to first future point)
+# connector to visually link last historical to first forecast
 connector = pd.DataFrame([{
     "date": hist_data["date"].iloc[-1],
     "Value": hist_data["Value"].iloc[-1],
     "Type": "Forecast"
 }])
-fut_data = pd.concat([connector, fut_data], ignore_index=True)
+fut_plot = pd.concat([connector, fut_plot], ignore_index=True)
 
-plot_df = pd.concat([hist_data, fut_data], ignore_index=True)
+plot_df = pd.concat([hist_data, fut_plot], ignore_index=True)
 
-fig = px.line(
-    plot_df, 
-    x="date", 
-    y="Value", 
-    color="Type",
-    color_discrete_map={"Historical": "cyan", "Forecast": "orange"},
-    title="BTC-USD Prediction"
-)
+fig = px.line(plot_df, x="date", y="Value", color="Type", title="BTC Price Forecast (log-return model)")
 fig.update_layout(xaxis_title="Date", yaxis_title="Price (USD)", hovermode="x unified")
-
 st.plotly_chart(fig, use_container_width=True)
 
-with st.expander("Show Raw Data"):
-    st.dataframe(future_df)
+with st.expander("Show forecast table"):
+    st.dataframe(future_df.reset_index(drop=True))
+
+with st.expander("Model & scalers info"):
+    st.write("Model summary:")
+    model.summary(print_fn=lambda s: st.text(s))
+    st.write("Price scaler min/max (log_return):", getattr(price_scaler, "data_min_", None), getattr(price_scaler, "data_max_", None))
+    st.write("Feature scaler min/max:", getattr(feature_scaler, "data_min_", None), getattr(feature_scaler, "data_max_", None))
+
+st.markdown("""
+### Notes & next steps
+- This model predicts **log returns**, which improves stationarity and typically leads to better generalization.
+- Consider **walk-forward retraining** in a live setting (train on expanding window or retrain regularly).
+- To estimate uncertainty, consider MC-dropout, or ensemble several trained models and show quantiles.
+- If you want, I can:
+  - add walk-forward retraining and rolling evaluation,
+  - add prediction intervals,
+  - convert model to directly predict multi-day sequences (non-recursive).
+""")
