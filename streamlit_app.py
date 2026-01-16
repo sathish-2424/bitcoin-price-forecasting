@@ -165,6 +165,10 @@ def predict_future(df, model, scaler):
 # ================= UI =================
 st.title("📈 Bitcoin Price Prediction")
 
+if future_df.empty:
+    st.error("❌ Prediction failed: insufficient historical data.")
+    st.stop()
+
 last_price = float(df["price"].iloc[-1])
 future_price = float(future_df["predicted_price"].iloc[-1])
 change_pct = ((future_price - last_price) / last_price) * 100
@@ -173,6 +177,7 @@ c1, c2, c3 = st.columns(3)
 c1.metric("Last Price", f"${last_price:,.0f}")
 c2.metric("14-Day Forecast", f"${future_price:,.0f}")
 c3.metric("Expected Change", f"{change_pct:.2f}%")
+
 
 plot_df = pd.concat([
     df[["date", "price"]].rename(columns={"price": "value"}).assign(Type="Actual"),
