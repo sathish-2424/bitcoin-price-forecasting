@@ -1,7 +1,7 @@
 streamlit
-numpy
-pandas
 yfinance
-scikit-learn
-tensorflow
+xgboost
+pandas
+numpy
 plotly
+scikit-learn
