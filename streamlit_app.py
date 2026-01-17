@@ -1,5 +1,5 @@
 # =====================================================
-# Bitcoin Price Forecasting (XGBoost – Stable Version)
+# Bitcoin Price Forecasting
 # =====================================================
 
 import streamlit as st
@@ -22,9 +22,10 @@ st.set_page_config(
 
 # ================= CONFIG =================
 TICKER = "BTC-USD"
-PERIOD = "5y"        # Increased for stability
+PERIOD = "5y"          # IMPORTANT for Streamlit Cloud
 INTERVAL = "1d"
 FUTURE_DAYS = 14
+MIN_ROWS = 40          # Cloud-safe minimum
 
 FEATURES = [
     "price_lag1",
@@ -60,7 +61,13 @@ def add_technical_indicators(df):
 # ================= LOAD DATA =================
 @st.cache_data
 def load_data():
-    df = yf.download(TICKER, period=PERIOD, interval=INTERVAL, progress=False)
+    df = yf.download(
+        TICKER,
+        period=PERIOD,
+        interval=INTERVAL,
+        progress=False,
+        auto_adjust=False
+    )
 
     if df.empty:
         return pd.DataFrame()
@@ -78,7 +85,7 @@ def load_data():
     df = add_technical_indicators(df)
     df["target"] = df["price"].shift(-1)
 
-    df.dropna(inplace=True)
+    df = df.dropna().reset_index(drop=True)
     return df
 
 # ================= TRAIN MODEL =================
@@ -87,15 +94,10 @@ def train_model(df):
     X = df[FEATURES]
     y = df["target"]
 
-    if X.empty or y.empty:
-        return None
-
-    split = int(len(df) * 0.9)
-
     model = XGBRegressor(
-        n_estimators=500,
-        learning_rate=0.03,
-        max_depth=6,
+        n_estimators=300,     # lower for faster cloud start
+        learning_rate=0.05,
+        max_depth=5,
         subsample=0.8,
         colsample_bytree=0.8,
         objective="reg:squarederror",
@@ -103,12 +105,12 @@ def train_model(df):
         n_jobs=-1
     )
 
-    model.fit(X.iloc[:split], y.iloc[:split])
+    model.fit(X, y)
     return model
 
-# ================= FUTURE PREDICTION (NO ERROR) =================
+# ================= FUTURE PREDICTION (BULLETPROOF) =================
 def predict_future(df, model, days):
-    if df.empty or model is None or len(df) < 30:
+    if df.empty or model is None:
         return pd.DataFrame(columns=["date", "predicted_price"])
 
     history = df[["date", "price"]].copy()
@@ -119,14 +121,7 @@ def predict_future(df, model, days):
     for _ in range(days):
         history = add_technical_indicators(history)
 
-        if not set(FEATURES).issubset(history.columns):
-            break
-
         features_df = history[FEATURES].ffill().bfill()
-
-        if features_df.empty:
-            break
-
         X_last = features_df.iloc[-1:]
 
         try:
@@ -157,12 +152,17 @@ st.title("⚡ Bitcoin Price Prediction")
 
 df = load_data()
 
-if df.empty or len(df) < 60:
-    st.error("Not enough data available to generate forecast.")
+if df.empty:
+    st.error("No data returned from Yahoo Finance. Please refresh.")
     st.stop()
 
-model = train_model(df)
+if len(df) < MIN_ROWS:
+    st.warning(
+        f"Limited data available ({len(df)} rows). "
+        "Forecast accuracy may be reduced."
+    )
 
+model = train_model(df)
 future_df = predict_future(df, model, FUTURE_DAYS)
 
 current_price = df["price"].iloc[-1]
