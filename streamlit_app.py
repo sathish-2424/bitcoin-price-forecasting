@@ -1,5 +1,5 @@
 # =====================================================
-# Bitcoin Price Forecasting
+# Bitcoin Price Forecasting (XGBoost – FINAL SAFE)
 # =====================================================
 
 import streamlit as st
@@ -60,11 +60,12 @@ def add_technical_indicators(df):
     df["rsi"] = 100 - (100 / (1 + rs))
     return df
 
-# ================= LOAD DATA (Yahoo + Fallback) =================
+# ================= LOAD DATA (YAHOO + CSV SAFE) =================
 @st.cache_data
 def load_data():
     df = pd.DataFrame()
 
+    # ---- Try Yahoo Finance ----
     try:
         df = yf.download(
             TICKER,
@@ -76,7 +77,7 @@ def load_data():
     except Exception:
         df = pd.DataFrame()
 
-    # ---- If Yahoo fails, load backup CSV ----
+    # ---- Fallback to CSV ----
     if df.empty and os.path.exists(BACKUP_FILE):
         st.warning("Yahoo Finance unavailable. Using cached BTC data.")
         df = pd.read_csv(BACKUP_FILE)
@@ -84,10 +85,24 @@ def load_data():
     if df.empty:
         return pd.DataFrame()
 
-    # ---- Normalize columns ----
-    df = df.reset_index()
+    # ---- Normalize columns safely ----
+    df = df.reset_index(drop=False)
 
-    df.columns = [c.lower() for c in df.columns]
+    df.columns = [
+        str(col).strip().lower().replace(" ", "_")
+        for col in df.columns
+    ]
+
+    # ---- Ensure date column exists ----
+    if "date" not in df.columns:
+        if "timestamp" in df.columns:
+            df = df.rename(columns={"timestamp": "date"})
+        else:
+            return pd.DataFrame()
+
+    # ---- Ensure close price exists ----
+    if "close" not in df.columns:
+        return pd.DataFrame()
 
     df = df[["date", "close"]].rename(columns={"close": "price"})
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
