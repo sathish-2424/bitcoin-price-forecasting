@@ -1,5 +1,5 @@
 # =====================================================
-# Bitcoin Price Forecasting
+# Bitcoin Price Forecasting (XGBoost – Stable Version)
 # =====================================================
 
 import streamlit as st
@@ -22,7 +22,7 @@ st.set_page_config(
 
 # ================= CONFIG =================
 TICKER = "BTC-USD"
-PERIOD = "2y"
+PERIOD = "5y"        # Increased for stability
 INTERVAL = "1d"
 FUTURE_DAYS = 14
 
@@ -61,6 +61,10 @@ def add_technical_indicators(df):
 @st.cache_data
 def load_data():
     df = yf.download(TICKER, period=PERIOD, interval=INTERVAL, progress=False)
+
+    if df.empty:
+        return pd.DataFrame()
+
     df = df.reset_index()
 
     if isinstance(df.columns, pd.MultiIndex):
@@ -72,8 +76,6 @@ def load_data():
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
     df = add_technical_indicators(df)
-
-    # Target = next day price
     df["target"] = df["price"].shift(-1)
 
     df.dropna(inplace=True)
@@ -85,9 +87,10 @@ def train_model(df):
     X = df[FEATURES]
     y = df["target"]
 
+    if X.empty or y.empty:
+        return None
+
     split = int(len(df) * 0.9)
-    X_train, X_test = X.iloc[:split], X.iloc[split:]
-    y_train, y_test = y.iloc[:split], y.iloc[split:]
 
     model = XGBRegressor(
         n_estimators=500,
@@ -100,32 +103,38 @@ def train_model(df):
         n_jobs=-1
     )
 
-    model.fit(X_train, y_train)
+    model.fit(X.iloc[:split], y.iloc[:split])
     return model
 
-# ================= FUTURE PREDICTION =================
+# ================= FUTURE PREDICTION (NO ERROR) =================
 def predict_future(df, model, days):
-    if df.empty:
+    if df.empty or model is None or len(df) < 30:
         return pd.DataFrame(columns=["date", "predicted_price"])
 
-    history = df.copy()
-
-    if len(history) == 0:
-        return pd.DataFrame(columns=["date", "predicted_price"])
-
+    history = df[["date", "price"]].copy()
     future_preds = []
+
     last_date = pd.to_datetime(history["date"].iloc[-1])
 
     for _ in range(days):
         history = add_technical_indicators(history)
 
-        if history[FEATURES].isna().any().any():
-            history[FEATURES] = history[FEATURES].ffill().bfill()
+        if not set(FEATURES).issubset(history.columns):
+            break
 
-        X_last = history[FEATURES].iloc[-1:]
+        features_df = history[FEATURES].ffill().bfill()
 
-        pred_price = model.predict(X_last)[0]
-        pred_price = max(pred_price, 1)
+        if features_df.empty:
+            break
+
+        X_last = features_df.iloc[-1:]
+
+        try:
+            pred_price = float(model.predict(X_last)[0])
+        except Exception:
+            break
+
+        pred_price = max(pred_price, 1.0)
 
         last_date += timedelta(days=1)
         while last_date.weekday() >= 5:
@@ -147,37 +156,33 @@ def predict_future(df, model, days):
 st.title("⚡ Bitcoin Price Prediction")
 
 df = load_data()
+
+if df.empty or len(df) < 60:
+    st.error("Not enough data available to generate forecast.")
+    st.stop()
+
 model = train_model(df)
 
 future_df = predict_future(df, model, FUTURE_DAYS)
 
 current_price = df["price"].iloc[-1]
-future_price = future_df["predicted_price"].iloc[-1]
+future_price = (
+    future_df["predicted_price"].iloc[-1]
+    if not future_df.empty else current_price
+)
 
 # ================= METRICS =================
 col1, col2, col3 = st.columns(3)
 
-col1.metric(
-    "Current BTC Price",
-    f"${current_price:,.2f}"
-)
+col1.metric("Current BTC Price", f"${current_price:,.2f}")
+col2.metric(f"Price After {FUTURE_DAYS} Days", f"${future_price:,.2f}")
 
-col2.metric(
-    f"Price After {FUTURE_DAYS} Days",
-    f"${future_price:,.2f}"
-)
-
-# Safe + clean expected change calculation
 expected_change = (
     (future_price - current_price) / current_price * 100
     if current_price != 0 else 0
 )
 
-col3.metric(
-    "Expected Change",
-    f"{expected_change:+.2f}%"
-)
-
+col3.metric("Expected Change", f"{expected_change:+.2f}%")
 
 # ================= PLOT =================
 st.subheader("📈 BTC Price Forecast")
@@ -195,7 +200,7 @@ fig = px.line(
     x="date",
     y="Value",
     color="Type",
-    title="Bitcoin Price Forecast",
+    title="Bitcoin Price Forecast"
 )
 fig.update_layout(xaxis_title="Date", yaxis_title="Price (USD)")
 
