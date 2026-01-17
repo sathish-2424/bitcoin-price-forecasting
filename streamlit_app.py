@@ -105,27 +105,36 @@ def train_model(df):
 
 # ================= FUTURE PREDICTION =================
 def predict_future(df, model, days):
+    if df.empty:
+        return pd.DataFrame(columns=["date", "predicted_price"])
+
     history = df.copy()
+
+    if len(history) == 0:
+        return pd.DataFrame(columns=["date", "predicted_price"])
+
     future_preds = []
-    last_date = history["date"].iloc[-1]
+    last_date = pd.to_datetime(history["date"].iloc[-1])
 
     for _ in range(days):
         history = add_technical_indicators(history)
+
+        if history[FEATURES].isna().any().any():
+            history[FEATURES] = history[FEATURES].ffill().bfill()
+
         X_last = history[FEATURES].iloc[-1:]
 
         pred_price = model.predict(X_last)[0]
         pred_price = max(pred_price, 1)
 
         last_date += timedelta(days=1)
-        while last_date.weekday() >= 5:  # Skip weekends
+        while last_date.weekday() >= 5:
             last_date += timedelta(days=1)
 
-        new_row = pd.DataFrame({
-            "date": [last_date],
-            "price": [pred_price]
-        })
-
-        history = pd.concat([history, new_row], ignore_index=True)
+        history = pd.concat(
+            [history, pd.DataFrame({"date": [last_date], "price": [pred_price]})],
+            ignore_index=True
+        )
 
         future_preds.append({
             "date": last_date,
