@@ -197,8 +197,7 @@ def predict_future(df, model, days):
     return pd.DataFrame(future_preds)
 
 # ================= UI LAYOUT =================
-st.title("⚡ Bitcoin Price Prediction (XGBoost)")
-st.markdown(f"Forecasting the next **{FUTURE_DAYS} days** based on historical trends.")
+st.title("⚡ Bitcoin Price Prediction")
 
 # 1. Load Data
 with st.spinner("Downloading market data..."):
