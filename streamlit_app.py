@@ -1,180 +1,218 @@
+# =========================================================
+# Bitcoin Price Prediction Dashboard
+# LSTM + Streamlit (Full Version with Extra Charts)
+# =========================================================
+
 import streamlit as st
 import yfinance as yf
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-import plotly.express as px
-from datetime import datetime, timedelta
-from model import train_or_load_model, SEQUENCE_LENGTH
-import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
-st.set_page_config(page_title=" Bitcoin Price Prediction", layout="wide")
+# ---------------------------------------------------------
+# Page Configuration
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="Bitcoin Price Prediction",
+    page_icon="📈",
+    layout="wide"
+)
 
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now()
-if 'predictions_history' not in st.session_state:
-    st.session_state.predictions_history = []
+st.title("📈 Bitcoin Price Prediction")
 
-@st.cache_data(ttl=1800)
-def fetch_bitcoin_data(period="60d", interval="1h"):
-    try:
-        logger.info(f"Fetching {period} of {interval} Bitcoin data...")
-        btc = yf.download("BTC-USD", period=period, interval=interval, progress=False)
-        
-        if isinstance(btc, pd.DataFrame):
-            btc = btc[['Close']].copy()
-        else:
-            raise ValueError("yfinance returned unexpected format")
-        
-        btc = btc.dropna()
-        
-        if len(btc) < SEQUENCE_LENGTH + 1:
-            logger.warning(f"Got {len(btc)} rows with {interval}. Fetching daily data...")
-            btc = yf.download("BTC-USD", period="1y", interval="1d", progress=False)
-            if isinstance(btc, pd.DataFrame):
-                btc = btc[['Close']].copy()
-            btc = btc.dropna()
-        
-        if len(btc) < SEQUENCE_LENGTH + 1:
-            raise ValueError(f"Insufficient data: got {len(btc)} rows, need {SEQUENCE_LENGTH + 1}")
-        
-        logger.info(f"Successfully fetched {len(btc)} data points")
-        return btc
-    
-    except Exception as e:
-        logger.error(f"Error fetching data: {e}")
-        raise
+# ---------------------------------------------------------
+# Sidebar Controls
+# ---------------------------------------------------------
+st.sidebar.header("⚙️ Settings")
+start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2018-01-01"))
+end_date = st.sidebar.date_input("End Date", pd.to_datetime("today"))
+lookback = st.sidebar.slider("Lookback Days", 30, 120, 60)
+epochs = st.sidebar.slider("Training Epochs", 5, 50, 10)
 
-st.title("🚀 Bitcoin Price Prediction")
+# ---------------------------------------------------------
+# Load Data
+# ---------------------------------------------------------
+@st.cache_data
+def load_data(start, end):
+    df = yf.download("BTC-USD", start=start, end=end, interval="1d")
+    return df[["Close"]]
 
-if datetime.now() - st.session_state.last_update > timedelta(minutes=5):
-    st.session_state.last_update = datetime.now()
-    st.cache_data.clear()
-    st.rerun()
+data = load_data(start_date, end_date)
 
-try:
-    with st.spinner("📊 Fetching Bitcoin data..."):
-        btc = fetch_bitcoin_data()
-    
-    if not isinstance(btc, pd.DataFrame):
-        raise ValueError("Data format error: expected DataFrame")
-    
-    # Prepare dataframe with price and moving averages
-    df = btc.copy()
-    df.reset_index(inplace=True)
-    df.rename(columns={'Close': 'price', 'Datetime': 'date'}, inplace=True)
-    df['ma_7'] = df['price'].rolling(window=7).mean()
-    df['ma_30'] = df['price'].rolling(window=30).mean()
-    
-    current_price = float(btc['Close'].iloc[-1])
-    close_prices = btc['Close'].values.reshape(-1, 1)
-    
-    with st.spinner("🤖 Loading model..."):
-        model, scaler = train_or_load_model(close_prices)
-    
-    last_sequence = scaler.transform(btc[['Close']].tail(SEQUENCE_LENGTH).values).reshape(1, SEQUENCE_LENGTH, 1)
-    prediction = model.predict(last_sequence, verbose=0)
-    predicted_price = scaler.inverse_transform(prediction)[0][0]
-    
-    forecast_price = predicted_price
-    expected_change = (
-        (forecast_price - current_price) / current_price * 100
-        if current_price != 0 else 0
-    )
-    
-    # Display key metrics
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Current BTC Price", f"${current_price:,.2f}")
-    col2.metric("Forecast Price", f"${forecast_price:,.2f}")
-    col3.metric("Expected Change", f"{expected_change:+.2f}%")
-    
-    # Plot with Plotly
-    st.subheader("📊 Bitcoin Price with Moving Averages")
-    plot_df = df.tail(90).copy()
-    
-    fig = px.line(
-        plot_df,
-        x="date",
-        y=["price", "ma_7", "ma_30"],
-        title="Bitcoin Price with Moving Averages (Last 90 Days)"
-    )
-    
-    fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Price (USD)",
-        hovermode="x unified",
-        height=500
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    
-    price_change = predicted_price - current_price
-    price_change_pct = (price_change / current_price) * 100
-    
-    new_prediction = {
-        'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'Current Price': f"${current_price:,.2f}",
-        'Predicted Price': f"${predicted_price:,.2f}",
-        'Change': f"${price_change:,.2f}",
-        'Change %': f"{price_change_pct:+.2f}%",
-        'Direction': '📈 Up' if price_change >= 0 else '📉 Down'
-    }
-    
-    
-    st.session_state.predictions_history.insert(0, new_prediction)
-    if len(st.session_state.predictions_history) > 10:
-        st.session_state.predictions_history = st.session_state.predictions_history[:10]
-    
-    st.subheader("📋 Last 10 Predictions")
-    if st.session_state.predictions_history:
-        history_df = pd.DataFrame(st.session_state.predictions_history)
-        st.dataframe(history_df, use_container_width=True, hide_index=True)
-    
-    st.subheader("🕯️ Candlestick Chart (Last 30 Days)")
-    
-    try:
-        daily_data = yf.download("BTC-USD", period="30d", interval="1d", progress=False)
-        
-        if isinstance(daily_data, pd.DataFrame) and len(daily_data) > 0:
-            daily_data = daily_data[['Open', 'High', 'Low', 'Close']].copy()
-            
-            fig_candle, ax_candle = plt.subplots(figsize=(14, 6))
-            
-            x = np.arange(len(daily_data))
-            width = 0.6
-            
-            for i in range(len(daily_data)):
-                open_price = float(daily_data['Open'].iloc[i])
-                close_price = float(daily_data['Close'].iloc[i])
-                high_price = float(daily_data['High'].iloc[i])
-                low_price = float(daily_data['Low'].iloc[i])
-                
-                color = 'green' if close_price >= open_price else 'red'
-                
-                ax_candle.plot([i, i], [low_price, high_price], color=color, linewidth=1.5)
-                
-                height = close_price - open_price
-                bottom = min(open_price, close_price)
-                ax_candle.bar(i, height, width/10, bottom=bottom, color=color, edgecolor='black', linewidth=0.5)
-            
-            ax_candle.set_xticks(x[::3])
-            ax_candle.set_xticklabels([daily_data.index[i].strftime('%Y-%m-%d') for i in range(0, len(daily_data), 3)], rotation=45)
-            ax_candle.set_title("Bitcoin Candlestick Chart (Last 30 Days)", fontsize=14, fontweight="bold")
-            ax_candle.set_xlabel("Date", fontsize=12)
-            ax_candle.set_ylabel("Price (USD)", fontsize=12)
-            ax_candle.grid(True, alpha=0.3)
-            ax_candle.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
-            
-            plt.tight_layout()
-            st.pyplot(fig_candle, use_container_width=True)
-    except Exception as e:
-        logger.warning(f"Candlestick chart error: {e}")
+# ---------------------------------------------------------
+# Display Price Chart
+# ---------------------------------------------------------
+st.subheader("📊 Historical Bitcoin Prices")
+st.line_chart(data)
 
-except Exception as e:
-    logger.error(f"Error: {e}", exc_info=True)
-    st.error(f"❌ Error: {str(e)}")
-    st.info("Please refresh the page and try again.")
+# ---------------------------------------------------------
+# Technical Indicators
+# ---------------------------------------------------------
+data["MA20"] = data["Close"].rolling(window=20).mean()
+data["MA50"] = data["Close"].rolling(window=50).mean()
+
+# RSI Function
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+data["RSI"] = calculate_rsi(data["Close"])
+data["Daily Change (%)"] = data["Close"].pct_change() * 100
+
+# ---------------------------------------------------------
+# Data Preprocessing
+# ---------------------------------------------------------
+scaler = MinMaxScaler()
+scaled_data = scaler.fit_transform(data[["Close"]])
+
+X, y = [], []
+for i in range(lookback, len(scaled_data)):
+    X.append(scaled_data[i - lookback:i, 0])
+    y.append(scaled_data[i, 0])
+
+X, y = np.array(X), np.array(y)
+X = X.reshape(X.shape[0], X.shape[1], 1)
+
+# ---------------------------------------------------------
+# LSTM Model
+# ---------------------------------------------------------
+model = Sequential([
+    LSTM(50, return_sequences=True, input_shape=(X.shape[1], 1)),
+    LSTM(50),
+    Dense(1)
+])
+
+model.compile(optimizer="adam", loss="mean_squared_error")
+
+with st.spinner("🔄 Training LSTM Model..."):
+    model.fit(X, y, epochs=epochs, batch_size=32, verbose=0)
+
+st.success("✅ Model Training Completed")
+
+# ---------------------------------------------------------
+# Next Day Prediction
+# ---------------------------------------------------------
+last_sequence = scaled_data[-lookback:]
+last_sequence = last_sequence.reshape(1, lookback, 1)
+
+prediction = model.predict(last_sequence)
+predicted_price = scaler.inverse_transform(prediction)
+
+# ---------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------
+st.subheader("🔮 Prediction Summary")
+
+col1, col2 = st.columns(2)
+current_price = data.iloc[-1]["Close"]
+price_change = predicted_price[0][0] - current_price
+
+col1.metric("Current Price", f"${current_price:,.2f}")
+col2.metric("Predicted Next Day Price", f"${predicted_price[0][0]:,.2f}",
+            f"{price_change:,.2f}")
+
+# ---------------------------------------------------------
+# Moving Average Chart
+# ---------------------------------------------------------
+st.subheader("📊 Moving Average Analysis")
+
+plt.figure(figsize=(12,5))
+plt.plot(data["Close"], label="BTC Close")
+plt.plot(data["MA20"], label="MA 20", linestyle="--")
+plt.plot(data["MA50"], label="MA 50", linestyle="--")
+plt.legend()
+st.pyplot(plt)
+
+# ---------------------------------------------------------
+# RSI Chart
+# ---------------------------------------------------------
+st.subheader("📐 RSI Indicator")
+
+plt.figure(figsize=(12,4))
+plt.plot(data["RSI"], label="RSI")
+plt.axhline(70, linestyle="--")
+plt.axhline(30, linestyle="--")
+plt.legend()
+st.pyplot(plt)
+
+# ---------------------------------------------------------
+# Daily Volatility Chart
+# ---------------------------------------------------------
+st.subheader("📉 Daily Price Change (%)")
+st.line_chart(data["Daily Change (%)"])
+
+# ---------------------------------------------------------
+# Actual vs Predicted Chart
+# ---------------------------------------------------------
+st.subheader("🤖 Actual vs Predicted Prices")
+
+train_predictions = model.predict(X)
+train_predictions = scaler.inverse_transform(train_predictions)
+actual_prices = scaler.inverse_transform(y.reshape(-1,1))
+
+plt.figure(figsize=(12,5))
+plt.plot(actual_prices, label="Actual")
+plt.plot(train_predictions, label="Predicted")
+plt.legend()
+st.pyplot(plt)
+
+# ---------------------------------------------------------
+# 7-Day Future Prediction
+# ---------------------------------------------------------
+st.subheader("📅 7-Day Future Forecast")
+
+future_days = 7
+temp_input = list(last_sequence.flatten())
+future_predictions = []
+
+for _ in range(future_days):
+    x_input = np.array(temp_input[-lookback:])
+    x_input = x_input.reshape(1, lookback, 1)
+    yhat = model.predict(x_input, verbose=0)
+    temp_input.append(yhat[0][0])
+    future_predictions.append(yhat[0][0])
+
+future_predictions = scaler.inverse_transform(
+    np.array(future_predictions).reshape(-1,1)
+)
+
+future_df = pd.DataFrame({
+    "Day": range(1, future_days+1),
+    "Predicted Price ($)": future_predictions.flatten()
+})
+
+st.table(future_df)
+
+# Confidence Band
+upper = future_predictions * 1.05
+lower = future_predictions * 0.95
+
+plt.figure(figsize=(10,4))
+plt.plot(future_predictions, label="Prediction")
+plt.fill_between(range(future_days),
+                 lower.flatten(),
+                 upper.flatten(),
+                 alpha=0.3)
+plt.legend()
+st.pyplot(plt)
+
+# ---------------------------------------------------------
+# Last 10 Days Table
+# ---------------------------------------------------------
+st.subheader("📋 Last 10 Days Data")
+st.dataframe(data.tail(10))
+
+# ---------------------------------------------------------
+# Footer
+# ---------------------------------------------------------
+st.markdown("---")
+st.markdown("🚀 **Built with LSTM, Yahoo Finance & Streamlit**")
