@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import plotly.express as px
 from datetime import datetime, timedelta
 from model import train_or_load_model, SEQUENCE_LENGTH
 import logging
@@ -61,6 +62,13 @@ try:
     if not isinstance(btc, pd.DataFrame):
         raise ValueError("Data format error: expected DataFrame")
     
+    # Prepare dataframe with price and moving averages
+    df = btc.copy()
+    df.reset_index(inplace=True)
+    df.rename(columns={'Close': 'price', 'Datetime': 'date'}, inplace=True)
+    df['ma_7'] = df['price'].rolling(window=7).mean()
+    df['ma_30'] = df['price'].rolling(window=30).mean()
+    
     current_price = float(btc['Close'].iloc[-1])
     close_prices = btc['Close'].values.reshape(-1, 1)
     
@@ -70,6 +78,39 @@ try:
     last_sequence = scaler.transform(btc[['Close']].tail(SEQUENCE_LENGTH).values).reshape(1, SEQUENCE_LENGTH, 1)
     prediction = model.predict(last_sequence, verbose=0)
     predicted_price = scaler.inverse_transform(prediction)[0][0]
+    
+    forecast_price = predicted_price
+    expected_change = (
+        (forecast_price - current_price) / current_price * 100
+        if current_price != 0 else 0
+    )
+    
+    # Display key metrics
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Current BTC Price", f"${current_price:,.2f}")
+    col2.metric("Forecast Price", f"${forecast_price:,.2f}")
+    col3.metric("Expected Change", f"{expected_change:+.2f}%")
+    
+    # Plot with Plotly
+    st.subheader("📊 Bitcoin Price with Moving Averages")
+    plot_df = df.tail(90).copy()
+    
+    fig = px.line(
+        plot_df,
+        x="date",
+        y=["price", "ma_7", "ma_30"],
+        title="Bitcoin Price with Moving Averages (Last 90 Days)"
+    )
+    
+    fig.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Price (USD)",
+        hovermode="x unified",
+        height=500
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
     
     price_change = predicted_price - current_price
     price_change_pct = (price_change / current_price) * 100
@@ -83,18 +124,10 @@ try:
         'Direction': '📈 Up' if price_change >= 0 else '📉 Down'
     }
     
+    
     st.session_state.predictions_history.insert(0, new_prediction)
     if len(st.session_state.predictions_history) > 10:
         st.session_state.predictions_history = st.session_state.predictions_history[:10]
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("📈 Current BTC", f"${current_price:,.2f}")
-    with col2:
-        st.metric("🔮 Predicted", f"${predicted_price:,.2f}", delta=f"{price_change_pct:+.2f}%")
-    with col3:
-        confidence = "🟢 High" if abs(price_change_pct) < 2 else "🟡 Medium" if abs(price_change_pct) < 5 else "🔴 Low"
-        st.metric("Confidence", confidence)
     
     st.subheader("📋 Last 10 Predictions")
     if st.session_state.predictions_history:
