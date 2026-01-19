@@ -1,6 +1,6 @@
 # =========================================================
-# Bitcoin Price Prediction Dashboard
-# LSTM + Streamlit (Full Version with Extra Charts)
+# Bitcoin Price Prediction using LSTM + Streamlit
+# FULL WORKING VERSION (MultiIndex FIXED)
 # =========================================================
 
 import streamlit as st
@@ -14,7 +14,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 
 # ---------------------------------------------------------
-# Page Configuration
+# Page Config
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Bitcoin Price Prediction",
@@ -25,37 +25,44 @@ st.set_page_config(
 st.title("📈 Bitcoin Price Prediction")
 
 # ---------------------------------------------------------
-# Sidebar Controls
+# Sidebar
 # ---------------------------------------------------------
-st.sidebar.header("⚙️ Settings")
+st.sidebar.header("⚙️ Model Settings")
+
 start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2018-01-01"))
 end_date = st.sidebar.date_input("End Date", pd.to_datetime("today"))
 lookback = st.sidebar.slider("Lookback Days", 30, 120, 60)
 epochs = st.sidebar.slider("Training Epochs", 5, 50, 10)
 
 # ---------------------------------------------------------
-# Load Data
+# Load Data (FIXED)
 # ---------------------------------------------------------
 @st.cache_data
 def load_data(start, end):
     df = yf.download("BTC-USD", start=start, end=end, interval="1d")
+
+    # ✅ FIX: Remove MultiIndex columns
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     return df[["Close"]]
 
 data = load_data(start_date, end_date)
 
 # ---------------------------------------------------------
-# Display Price Chart
+# Historical Price Chart (SAFE)
 # ---------------------------------------------------------
 st.subheader("📊 Historical Bitcoin Prices")
-st.line_chart(data)
+st.line_chart(data["Close"])
 
 # ---------------------------------------------------------
 # Technical Indicators
 # ---------------------------------------------------------
-data["MA20"] = data["Close"].rolling(window=20).mean()
-data["MA50"] = data["Close"].rolling(window=50).mean()
+data["MA20"] = data["Close"].rolling(20).mean()
+data["MA50"] = data["Close"].rolling(50).mean()
+data["Daily Change (%)"] = data["Close"].pct_change() * 100
 
-# RSI Function
+# RSI
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.where(delta > 0, 0)
@@ -66,7 +73,6 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 data["RSI"] = calculate_rsi(data["Close"])
-data["Daily Change (%)"] = data["Close"].pct_change() * 100
 
 # ---------------------------------------------------------
 # Data Preprocessing
@@ -86,17 +92,17 @@ X = X.reshape(X.shape[0], X.shape[1], 1)
 # LSTM Model
 # ---------------------------------------------------------
 model = Sequential([
-    LSTM(50, return_sequences=True, input_shape=(X.shape[1], 1)),
+    LSTM(50, return_sequences=True, input_shape=(lookback, 1)),
     LSTM(50),
     Dense(1)
 ])
 
 model.compile(optimizer="adam", loss="mean_squared_error")
 
-with st.spinner("🔄 Training LSTM Model..."):
+with st.spinner("🔄 Training LSTM model..."):
     model.fit(X, y, epochs=epochs, batch_size=32, verbose=0)
 
-st.success("✅ Model Training Completed")
+st.success("✅ Model trained successfully")
 
 # ---------------------------------------------------------
 # Next Day Prediction
@@ -104,8 +110,11 @@ st.success("✅ Model Training Completed")
 last_sequence = scaled_data[-lookback:]
 last_sequence = last_sequence.reshape(1, lookback, 1)
 
-prediction = model.predict(last_sequence)
-predicted_price = scaler.inverse_transform(prediction)
+next_day_prediction = model.predict(last_sequence)
+next_day_price = scaler.inverse_transform(next_day_prediction)[0][0]
+
+current_price = data.iloc[-1]["Close"]
+price_change = next_day_price - current_price
 
 # ---------------------------------------------------------
 # Metrics
@@ -113,11 +122,8 @@ predicted_price = scaler.inverse_transform(prediction)
 st.subheader("🔮 Prediction Summary")
 
 col1, col2 = st.columns(2)
-current_price = data.iloc[-1]["Close"]
-price_change = predicted_price[0][0] - current_price
-
 col1.metric("Current Price", f"${current_price:,.2f}")
-col2.metric("Predicted Next Day Price", f"${predicted_price[0][0]:,.2f}",
+col2.metric("Predicted Next Day Price", f"${next_day_price:,.2f}",
             f"{price_change:,.2f}")
 
 # ---------------------------------------------------------
@@ -127,8 +133,8 @@ st.subheader("📊 Moving Average Analysis")
 
 plt.figure(figsize=(12,5))
 plt.plot(data["Close"], label="BTC Close")
-plt.plot(data["MA20"], label="MA 20", linestyle="--")
-plt.plot(data["MA50"], label="MA 50", linestyle="--")
+plt.plot(data["MA20"], "--", label="MA 20")
+plt.plot(data["MA50"], "--", label="MA 50")
 plt.legend()
 st.pyplot(plt)
 
@@ -145,19 +151,19 @@ plt.legend()
 st.pyplot(plt)
 
 # ---------------------------------------------------------
-# Daily Volatility Chart
+# Daily Volatility
 # ---------------------------------------------------------
 st.subheader("📉 Daily Price Change (%)")
 st.line_chart(data["Daily Change (%)"])
 
 # ---------------------------------------------------------
-# Actual vs Predicted Chart
+# Actual vs Predicted
 # ---------------------------------------------------------
 st.subheader("🤖 Actual vs Predicted Prices")
 
 train_predictions = model.predict(X)
 train_predictions = scaler.inverse_transform(train_predictions)
-actual_prices = scaler.inverse_transform(y.reshape(-1,1))
+actual_prices = scaler.inverse_transform(y.reshape(-1, 1))
 
 plt.figure(figsize=(12,5))
 plt.plot(actual_prices, label="Actual")
@@ -166,9 +172,9 @@ plt.legend()
 st.pyplot(plt)
 
 # ---------------------------------------------------------
-# 7-Day Future Prediction
+# 7-Day Future Forecast
 # ---------------------------------------------------------
-st.subheader("📅 7-Day Future Forecast")
+st.subheader("📅 7-Day Bitcoin Forecast")
 
 future_days = 7
 temp_input = list(last_sequence.flatten())
@@ -186,7 +192,7 @@ future_predictions = scaler.inverse_transform(
 )
 
 future_df = pd.DataFrame({
-    "Day": range(1, future_days+1),
+    "Day": range(1, future_days + 1),
     "Predicted Price ($)": future_predictions.flatten()
 })
 
@@ -208,11 +214,11 @@ st.pyplot(plt)
 # ---------------------------------------------------------
 # Last 10 Days Table
 # ---------------------------------------------------------
-st.subheader("📋 Last 10 Days Data")
+st.subheader("📋 Last 10 Days Prices")
 st.dataframe(data.tail(10))
 
 # ---------------------------------------------------------
 # Footer
 # ---------------------------------------------------------
 st.markdown("---")
-st.markdown("🚀 **Built with LSTM, Yahoo Finance & Streamlit**")
+st.markdown("🚀 Built with LSTM, Yahoo Finance & Streamlit")
