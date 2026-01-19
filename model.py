@@ -64,8 +64,8 @@ def train_or_load_model(close_prices):
         model.compile(optimizer=Adam(learning_rate=0.001), loss="mse")
         model.fit(X, y, epochs=25, batch_size=16, verbose=0)
         
-        # Save model with safe method
-        model.save(MODEL_PATH, safe_mode=False)
+        # Save model
+        model.save(MODEL_PATH)
         with open(SCALER_PATH, 'wb') as f:
             pickle.dump(scaler, f)
         logger.info("Model and scaler saved successfully")
