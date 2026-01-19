@@ -21,19 +21,36 @@ if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now()
 
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
-def fetch_hourly_data():
-    """Fetch 7 days of hourly Bitcoin data from Yahoo Finance"""
+def fetch_bitcoin_data(period="60d", interval="1h"):
+    """
+    Fetch Bitcoin data with fallback strategy.
+    First tries hourly data, falls back to daily if needed.
+    """
     try:
-        logger.info("Fetching hourly Bitcoin data...")
+        logger.info(f"Attempting to fetch {period} of {interval} Bitcoin data...")
+        
         btc = yf.download(
             "BTC-USD",
-            period="7d",
-            interval="1h",
-            progress=False
+            period=period,
+            interval=interval,
+            progress=False,
+            timeout=30
         )
         
         # Clean data
         btc = btc[['Close']].dropna()
+        
+        if len(btc) < SEQUENCE_LENGTH + 1:
+            logger.warning(f"Got {len(btc)} rows with {interval}. Attempting daily data...")
+            # Fallback to daily data
+            btc = yf.download(
+                "BTC-USD",
+                period="1y",
+                interval="1d",
+                progress=False,
+                timeout=30
+            )
+            btc = btc[['Close']].dropna()
         
         if len(btc) < SEQUENCE_LENGTH + 1:
             raise ValueError(
@@ -49,7 +66,7 @@ def fetch_hourly_data():
 
 # Page title
 st.title("🚀 Live Bitcoin Price Prediction")
-st.caption("Hourly LSTM Model | Auto-refresh every 5 minutes")
+st.caption("LSTM Neural Network | Forecasts next trading period")
 
 # Check if refresh is needed (every 5 minutes)
 if datetime.now() - st.session_state.last_update > timedelta(minutes=5):
@@ -58,12 +75,14 @@ if datetime.now() - st.session_state.last_update > timedelta(minutes=5):
     st.rerun()
 
 try:
-    # Fetch data
-    btc = fetch_hourly_data()
+    # Fetch data with spinner
+    with st.spinner("📊 Fetching Bitcoin data..."):
+        btc = fetch_bitcoin_data()
+    
     current_price = btc['Close'].iloc[-1]
     
-    # Train or load model
-    with st.spinner("Loading model..."):
+    # Train or load model with spinner
+    with st.spinner("🤖 Loading prediction model..."):
         model, scaler = train_or_load_model(btc[['Close']].values)
     
     # Make prediction
@@ -83,26 +102,34 @@ try:
     
     with col1:
         st.metric(
-            "Current BTC Price",
+            "📈 Current BTC Price",
             f"${current_price:,.2f}",
             delta=None
         )
     
     with col2:
+        delta_color = "green" if price_change >= 0 else "red"
         st.metric(
-            "Predicted Next Hour",
+            "🔮 Predicted Price",
             f"${predicted_price:,.2f}",
             delta=f"${price_change:,.2f} ({price_change_pct:+.2f}%)"
         )
     
     with col3:
-        confidence = "🟢 High" if abs(price_change_pct) < 2 else "🟡 Medium" if abs(price_change_pct) < 5 else "🔴 Low"
-        st.metric("Prediction Confidence", confidence)
+        if abs(price_change_pct) < 1:
+            confidence = "🟢 Very High"
+        elif abs(price_change_pct) < 2:
+            confidence = "🟢 High"
+        elif abs(price_change_pct) < 5:
+            confidence = "🟡 Medium"
+        else:
+            confidence = "🔴 Low"
+        st.metric("Confidence Level", confidence)
     
     # Plot
-    st.subheader("Price Trend & Forecast")
+    st.subheader("📊 Price Trend & Forecast")
     
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(14, 6))
     
     actual_prices = btc['Close'].values
     time_index = btc.index
@@ -113,37 +140,39 @@ try:
         actual_prices,
         label="Actual BTC Price",
         linewidth=2.5,
-        color="#1f77b4"
+        color="#1f77b4",
+        alpha=0.8
     )
     
-    # Plot prediction
-    predicted_time = time_index[-1] + pd.Timedelta(hours=1)
+    # Plot prediction (extend one period forward)
+    predicted_time = time_index[-1] + (time_index[-1] - time_index[-2])
     ax.plot(
         [time_index[-1], predicted_time],
         [current_price, predicted_price],
         linestyle="--",
         marker="o",
         markersize=8,
-        label="Predicted Next Hour",
+        label="Predicted Next Period",
         linewidth=2.5,
         color="#ff7f0e"
     )
     
-    # Add shaded area for uncertainty
+    # Add shaded area for uncertainty (±1.5%)
+    uncertainty = predicted_price * 0.015
     ax.fill_between(
         [time_index[-1], predicted_time],
-        [current_price - (current_price * 0.01), predicted_price - (predicted_price * 0.01)],
-        [current_price + (current_price * 0.01), predicted_price + (predicted_price * 0.01)],
+        [current_price - (current_price * 0.015), predicted_price - uncertainty],
+        [current_price + (current_price * 0.015), predicted_price + uncertainty],
         alpha=0.2,
         color="#ff7f0e",
-        label="±1% Uncertainty"
+        label="±1.5% Uncertainty Band"
     )
     
-    ax.set_title("Bitcoin Price: Actual vs Predicted", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Time", fontsize=11)
-    ax.set_ylabel("Price (USD)", fontsize=11)
-    ax.legend(loc="best", fontsize=10)
-    ax.grid(True, alpha=0.3)
+    ax.set_title("Bitcoin Price: Historical vs Forecast", fontsize=14, fontweight="bold")
+    ax.set_xlabel("Time", fontsize=12)
+    ax.set_ylabel("Price (USD)", fontsize=12)
+    ax.legend(loc="best", fontsize=11)
+    ax.grid(True, alpha=0.3, linestyle="--")
     
     # Format y-axis
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
@@ -158,30 +187,55 @@ try:
     with col1:
         st.info(
             f"""
-            **Model Details:**
-            - Architecture: 2-layer LSTM (50 units each)
-            - Sequence Length: {SEQUENCE_LENGTH} hours
-            - Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-            - Data Points: {len(btc)}
+            **🧠 Model Architecture:**
+            - Type: 2-Layer LSTM Neural Network
+            - Layer 1: 50 LSTM units (ReLU activation)
+            - Layer 2: 50 LSTM units (ReLU activation)
+            - Output: Dense layer with 1 unit
+            - Sequence Length: {SEQUENCE_LENGTH} periods
+            - Training Data Points: {len(btc)}
             """
         )
     
     with col2:
+        next_refresh = st.session_state.last_update + timedelta(minutes=5)
+        time_until_refresh = (next_refresh - datetime.now()).total_seconds()
+        
         st.success(
             f"""
-            **✅ Prediction Status:**
-            - Model Status: Active
-            - Last Refresh: {st.session_state.last_update.strftime('%H:%M:%S')}
-            - Next Refresh: {(st.session_state.last_update + timedelta(minutes=5)).strftime('%H:%M:%S')}
+            **✅ System Status:**
+            - Model Status: Active & Trained
             - Data Source: Yahoo Finance
+            - Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            - Next Auto-Refresh: {next_refresh.strftime('%H:%M:%S')}
+            - Time Until Refresh: {int(time_until_refresh)}s
             """
         )
+    
+    st.divider()
+    st.caption(
+        "⚠️ Disclaimer: This is a machine learning model for educational purposes only. "
+        "Bitcoin prices are volatile and unpredictable. Always conduct thorough research "
+        "before making investment decisions."
+    )
 
 except ValueError as e:
     st.error(f"❌ Data Error: {e}")
-    st.info("The Bitcoin hourly data requires at least 61 data points. Yahoo Finance may not have enough data at this moment. Please try again in a few minutes.")
-    
+    st.warning(
+        "The system couldn't fetch enough Bitcoin data. This can happen if:\n"
+        "- Yahoo Finance API is temporarily unavailable\n"
+        "- Network connection issues\n"
+        "- Market data delays\n\n"
+        "**Solution:** Please wait a moment and refresh the page."
+    )
+
 except Exception as e:
-    logger.error(f"Unexpected error: {e}")
-    st.error(f"❌ Error: {e}")
-    st.info("Please check the logs for details and try refreshing the page.")
+    logger.error(f"Unexpected error: {e}", exc_info=True)
+    st.error(f"❌ Unexpected Error: {str(e)}")
+    st.info(
+        "An unexpected error occurred. Please try one of the following:\n"
+        "1. Refresh the page\n"
+        "2. Clear browser cache (Ctrl+Shift+Delete)\n"
+        "3. Try again in a few minutes\n\n"
+        "If the problem persists, check your internet connection."
+    )

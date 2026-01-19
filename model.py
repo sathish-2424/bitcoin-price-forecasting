@@ -1,10 +1,11 @@
 import numpy as np
 import pickle
+import os
+import logging
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import LSTM, Dense
-import os
-import logging
+from tensorflow.keras.optimizers import Adam
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -26,12 +27,23 @@ def train_or_load_model(close_prices):
     """Train new model or load existing one with its scaler"""
     try:
         # Check if both model and scaler exist
-        if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
-            logger.info("Loading existing model and scaler")
-            model = load_model(MODEL_PATH)
-            with open(SCALER_PATH, 'rb') as f:
-                scaler = pickle.load(f)
-            return model, scaler
+        model_exists = os.path.exists(MODEL_PATH)
+        scaler_exists = os.path.exists(SCALER_PATH)
+        
+        if model_exists and scaler_exists:
+            try:
+                logger.info("Loading existing model and scaler")
+                model = load_model(MODEL_PATH)
+                with open(SCALER_PATH, 'rb') as f:
+                    scaler = pickle.load(f)
+                return model, scaler
+            except Exception as e:
+                logger.warning(f"Could not load existing model: {e}. Training new model...")
+                # Delete corrupted files
+                if os.path.exists(MODEL_PATH):
+                    os.remove(MODEL_PATH)
+                if os.path.exists(SCALER_PATH):
+                    os.remove(SCALER_PATH)
         
         # Train new model
         logger.info("Training new model")
@@ -44,18 +56,19 @@ def train_or_load_model(close_prices):
             raise ValueError(f"Insufficient training data: {len(X)} sequences")
         
         model = Sequential([
-            LSTM(50, return_sequences=True, input_shape=(SEQUENCE_LENGTH, 1)),
-            LSTM(50),
+            LSTM(50, return_sequences=True, input_shape=(SEQUENCE_LENGTH, 1), activation='relu'),
+            LSTM(50, activation='relu'),
             Dense(1)
         ])
-        model.compile(optimizer="adam", loss="mse")
-        model.fit(X, y, epochs=20, batch_size=16, verbose=0)
         
-        # Save model and scaler
-        model.save(MODEL_PATH)
+        model.compile(optimizer=Adam(learning_rate=0.001), loss="mse")
+        model.fit(X, y, epochs=25, batch_size=16, verbose=0)
+        
+        # Save model with safe method
+        model.save(MODEL_PATH, safe_mode=False)
         with open(SCALER_PATH, 'wb') as f:
             pickle.dump(scaler, f)
-        logger.info("Model and scaler saved")
+        logger.info("Model and scaler saved successfully")
         
         return model, scaler
     
