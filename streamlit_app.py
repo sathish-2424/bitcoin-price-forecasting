@@ -129,32 +129,10 @@ col2.metric("Predicted Next Day Price", f"${next_day_price:,.2f}",
 # ---------------------------------------------------------
 # Moving Average Chart
 # ---------------------------------------------------------
-st.subheader("📊 Moving Average Analysis")
-
-plt.figure(figsize=(12,5))
-plt.plot(data["Close"], label="BTC Close")
-plt.plot(data["MA20"], "--", label="MA 20")
-plt.plot(data["MA50"], "--", label="MA 50")
-plt.legend()
-st.pyplot(plt)
-
-# ---------------------------------------------------------
-# RSI Chart
-# ---------------------------------------------------------
-st.subheader("📐 RSI Indicator")
-
-plt.figure(figsize=(12,4))
-plt.plot(data["RSI"], label="RSI")
-plt.axhline(70, linestyle="--")
-plt.axhline(30, linestyle="--")
-plt.legend()
-st.pyplot(plt)
 
 # ---------------------------------------------------------
 # Daily Volatility
 # ---------------------------------------------------------
-st.subheader("📉 Daily Price Change (%)")
-st.line_chart(data["Daily Change (%)"])
 
 # ---------------------------------------------------------
 # Actual vs Predicted
@@ -197,20 +175,6 @@ future_df = pd.DataFrame({
 })
 
 st.table(future_df)
-
-# Confidence Band
-upper = future_predictions * 1.05
-lower = future_predictions * 0.95
-
-plt.figure(figsize=(10,4))
-plt.plot(future_predictions, label="Prediction")
-plt.fill_between(range(future_days),
-                 lower.flatten(),
-                 upper.flatten(),
-                 alpha=0.3)
-plt.legend()
-st.pyplot(plt)
-
 # ---------------------------------------------------------
 # Last 10 Days Table
 # ---------------------------------------------------------
