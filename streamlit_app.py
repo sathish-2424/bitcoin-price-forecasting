@@ -10,10 +10,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-st.set_page_config(page_title="Bitcoin Price Prediction", layout="wide")
+st.set_page_config(page_title=" Bitcoin Price Prediction", layout="wide")
 
 if 'last_update' not in st.session_state:
-st.session_state.last_update = datetime.now()
+    st.session_state.last_update = datetime.now()
 if 'predictions_history' not in st.session_state:
     st.session_state.predictions_history = []
 
@@ -87,7 +87,6 @@ try:
     if len(st.session_state.predictions_history) > 10:
         st.session_state.predictions_history = st.session_state.predictions_history[:10]
     
-    # Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("📈 Current BTC", f"${current_price:,.2f}")
@@ -97,14 +96,11 @@ try:
         confidence = "🟢 High" if abs(price_change_pct) < 2 else "🟡 Medium" if abs(price_change_pct) < 5 else "🔴 Low"
         st.metric("Confidence", confidence)
     
-    # Prediction History Table
     st.subheader("📋 Last 10 Predictions")
     if st.session_state.predictions_history:
         history_df = pd.DataFrame(st.session_state.predictions_history)
         st.dataframe(history_df, use_container_width=True, hide_index=True)
     
-        
-
     st.subheader("🕯️ Candlestick Chart (Last 30 Days)")
     
     try:
@@ -126,10 +122,8 @@ try:
                 
                 color = 'green' if close_price >= open_price else 'red'
                 
-                # High-Low line
                 ax_candle.plot([i, i], [low_price, high_price], color=color, linewidth=1.5)
                 
-                # Open-Close rectangle
                 height = close_price - open_price
                 bottom = min(open_price, close_price)
                 ax_candle.bar(i, height, width/10, bottom=bottom, color=color, edgecolor='black', linewidth=0.5)
