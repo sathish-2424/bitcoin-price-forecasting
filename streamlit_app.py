@@ -33,12 +33,16 @@ def fetch_bitcoin_data(period="60d", interval="1h"):
             "BTC-USD",
             period=period,
             interval=interval,
-            progress=False,
-            timeout=30
+            progress=False
         )
         
-        # Clean data
-        btc = btc[['Close']].dropna()
+        # Ensure we have a DataFrame with proper columns
+        if isinstance(btc, pd.DataFrame):
+            btc = btc[['Close']].copy()
+        else:
+            raise ValueError("yfinance returned unexpected format")
+        
+        btc = btc.dropna()
         
         if len(btc) < SEQUENCE_LENGTH + 1:
             logger.warning(f"Got {len(btc)} rows with {interval}. Attempting daily data...")
@@ -47,10 +51,15 @@ def fetch_bitcoin_data(period="60d", interval="1h"):
                 "BTC-USD",
                 period="1y",
                 interval="1d",
-                progress=False,
-                timeout=30
+                progress=False
             )
-            btc = btc[['Close']].dropna()
+            
+            if isinstance(btc, pd.DataFrame):
+                btc = btc[['Close']].copy()
+            else:
+                raise ValueError("yfinance returned unexpected format")
+            
+            btc = btc.dropna()
         
         if len(btc) < SEQUENCE_LENGTH + 1:
             raise ValueError(
@@ -79,11 +88,18 @@ try:
     with st.spinner("📊 Fetching Bitcoin data..."):
         btc = fetch_bitcoin_data()
     
-    current_price = btc['Close'].iloc[-1]
+    # Ensure btc is properly formatted
+    if not isinstance(btc, pd.DataFrame):
+        raise ValueError("Data format error: expected DataFrame")
+    
+    current_price = float(btc['Close'].iloc[-1])
+    
+    # Get close prices as numpy array
+    close_prices = btc['Close'].values.reshape(-1, 1)
     
     # Train or load model with spinner
     with st.spinner("🤖 Loading prediction model..."):
-        model, scaler = train_or_load_model(btc[['Close']].values)
+        model, scaler = train_or_load_model(close_prices)
     
     # Make prediction
     last_sequence = scaler.transform(
