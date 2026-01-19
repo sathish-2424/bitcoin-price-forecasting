@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Bitcoin Price Prediction", layout="wide")
 
 if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now()
+st.session_state.last_update = datetime.now()
 if 'predictions_history' not in st.session_state:
     st.session_state.predictions_history = []
 
@@ -103,66 +103,49 @@ try:
         history_df = pd.DataFrame(st.session_state.predictions_history)
         st.dataframe(history_df, use_container_width=True, hide_index=True)
     
-    # Line Chart
-    st.subheader("📊 Price Chart")
-    fig, ax = plt.subplots(figsize=(14, 6))
-    
-    actual_prices = btc['Close'].values
-    time_index = btc.index
-    
-    ax.plot(time_index, actual_prices, label="Actual Price", linewidth=2.5, color="#1f77b4")
-    
-    predicted_time = time_index[-1] + (time_index[-1] - time_index[-2])
-    ax.plot([time_index[-1], predicted_time], [current_price, predicted_price],
-            linestyle="--", marker="o", markersize=8, label="Predicted", linewidth=2.5, color="#ff7f0e")
-    
-    ax.set_title("Bitcoin Price: Actual vs Predicted", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Time", fontsize=12)
-    ax.set_ylabel("Price (USD)", fontsize=12)
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
-    
-    plt.tight_layout()
-    st.pyplot(fig, use_container_width=True)
-    
-    # Candlestick Chart
+        
+
     st.subheader("🕯️ Candlestick Chart (Last 30 Days)")
     
-    daily_data = yf.download("BTC-USD", period="30d", interval="1d", progress=False)
-    
-    if isinstance(daily_data, pd.DataFrame) and len(daily_data) > 0:
-        daily_data = daily_data[['Open', 'High', 'Low', 'Close']].copy()
+    try:
+        daily_data = yf.download("BTC-USD", period="30d", interval="1d", progress=False)
         
-        fig_candle, ax_candle = plt.subplots(figsize=(14, 6))
-        
-        colors = ['green' if daily_data['Close'].iloc[i] >= daily_data['Open'].iloc[i] 
-                  else 'red' for i in range(len(daily_data))]
-        
-        x = np.arange(len(daily_data))
-        width2 = 0.05
-        
-        for i in range(len(daily_data)):
-            ax_candle.plot([i, i], [daily_data['Low'].iloc[i], daily_data['High'].iloc[i]], 
-                          color=colors[i], linewidth=1.5)
-        
-        for i in range(len(daily_data)):
-            open_price = daily_data['Open'].iloc[i]
-            close_price = daily_data['Close'].iloc[i]
-            height = close_price - open_price
-            bottom = min(open_price, close_price)
-            ax_candle.bar(i, height, width2, bottom=bottom, color=colors[i], edgecolor='black', linewidth=0.5)
-        
-        ax_candle.set_xticks(x[::3])
-        ax_candle.set_xticklabels([daily_data.index[i].strftime('%Y-%m-%d') for i in range(0, len(daily_data), 3)], rotation=45)
-        ax_candle.set_title("Bitcoin Candlestick Chart (Last 30 Days)", fontsize=14, fontweight="bold")
-        ax_candle.set_xlabel("Date", fontsize=12)
-        ax_candle.set_ylabel("Price (USD)", fontsize=12)
-        ax_candle.grid(True, alpha=0.3)
-        ax_candle.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
-        
-        plt.tight_layout()
-        st.pyplot(fig_candle, use_container_width=True)
+        if isinstance(daily_data, pd.DataFrame) and len(daily_data) > 0:
+            daily_data = daily_data[['Open', 'High', 'Low', 'Close']].copy()
+            
+            fig_candle, ax_candle = plt.subplots(figsize=(14, 6))
+            
+            x = np.arange(len(daily_data))
+            width = 0.6
+            
+            for i in range(len(daily_data)):
+                open_price = float(daily_data['Open'].iloc[i])
+                close_price = float(daily_data['Close'].iloc[i])
+                high_price = float(daily_data['High'].iloc[i])
+                low_price = float(daily_data['Low'].iloc[i])
+                
+                color = 'green' if close_price >= open_price else 'red'
+                
+                # High-Low line
+                ax_candle.plot([i, i], [low_price, high_price], color=color, linewidth=1.5)
+                
+                # Open-Close rectangle
+                height = close_price - open_price
+                bottom = min(open_price, close_price)
+                ax_candle.bar(i, height, width/10, bottom=bottom, color=color, edgecolor='black', linewidth=0.5)
+            
+            ax_candle.set_xticks(x[::3])
+            ax_candle.set_xticklabels([daily_data.index[i].strftime('%Y-%m-%d') for i in range(0, len(daily_data), 3)], rotation=45)
+            ax_candle.set_title("Bitcoin Candlestick Chart (Last 30 Days)", fontsize=14, fontweight="bold")
+            ax_candle.set_xlabel("Date", fontsize=12)
+            ax_candle.set_ylabel("Price (USD)", fontsize=12)
+            ax_candle.grid(True, alpha=0.3)
+            ax_candle.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
+            
+            plt.tight_layout()
+            st.pyplot(fig_candle, use_container_width=True)
+    except Exception as e:
+        logger.warning(f"Candlestick chart error: {e}")
 
 except Exception as e:
     logger.error(f"Error: {e}", exc_info=True)
