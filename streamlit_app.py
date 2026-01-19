@@ -10,7 +10,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-st.set_page_config(page_title="Live Bitcoin Price Prediction", layout="wide")
+st.set_page_config(page_title="Bitcoin Price Prediction", layout="wide")
 
 if 'last_update' not in st.session_state:
     st.session_state.last_update = datetime.now()
@@ -47,8 +47,7 @@ def fetch_bitcoin_data(period="60d", interval="1h"):
         logger.error(f"Error fetching data: {e}")
         raise
 
-st.title("🚀 Live Bitcoin Price Prediction")
-st.caption("LSTM Neural Network Forecast")
+st.title("🚀 Bitcoin Price Prediction")
 
 if datetime.now() - st.session_state.last_update > timedelta(minutes=5):
     st.session_state.last_update = datetime.now()
