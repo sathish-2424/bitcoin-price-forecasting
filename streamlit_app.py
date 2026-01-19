@@ -12,13 +12,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 st.set_page_config(
-    page_title="Live Bitcoin Price Prediction",
+    page_title="Bitcoin Price Prediction",
     layout="wide"
 )
 
-# Initialize session state
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = datetime.now()
+# Initialize session state for prediction history
+if 'predictions_history' not in st.session_state:
+    st.session_state.predictions_history = []
 
 @st.cache_data(ttl=1800)  # Cache for 30 minutes
 def fetch_bitcoin_data(period="60d", interval="1h"):
@@ -74,8 +74,7 @@ def fetch_bitcoin_data(period="60d", interval="1h"):
         raise
 
 # Page title
-st.title("🚀 Live Bitcoin Price Prediction")
-st.caption("LSTM Neural Network | Forecasts next trading period")
+st.title("🚀 Bitcoin Price Prediction")
 
 # Check if refresh is needed (every 5 minutes)
 if datetime.now() - st.session_state.last_update > timedelta(minutes=5):
@@ -109,9 +108,23 @@ try:
     prediction = model.predict(last_sequence, verbose=0)
     predicted_price = scaler.inverse_transform(prediction)[0][0]
     
-    # Calculate price change
     price_change = predicted_price - current_price
     price_change_pct = (price_change / current_price) * 100
+    
+    # Store prediction in history
+    new_prediction = {
+        'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'Current Price': f"${current_price:,.2f}",
+        'Predicted Price': f"${predicted_price:,.2f}",
+        'Change': f"${price_change:,.2f}",
+        'Change %': f"{price_change_pct:+.2f}%",
+        'Direction': '📈 Up' if price_change >= 0 else '📉 Down'
+    }
+    
+    # Keep only last 10 predictions
+    st.session_state.predictions_history.insert(0, new_prediction)
+    if len(st.session_state.predictions_history) > 10:
+        st.session_state.predictions_history = st.session_state.predictions_history[:10]
     
     # Metrics dashboard
     col1, col2, col3 = st.columns(3)
@@ -142,7 +155,25 @@ try:
             confidence = "🔴 Low"
         st.metric("Confidence Level", confidence)
     
-    # Plot
+    # Prediction History Table
+    st.subheader("📋 Last 10 Predictions")
+    if st.session_state.predictions_history:
+        history_df = pd.DataFrame(st.session_state.predictions_history)
+        st.dataframe(
+            history_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Timestamp": st.column_config.TextColumn("Time", width="medium"),
+                "Current Price": st.column_config.TextColumn("Current", width="small"),
+                "Predicted Price": st.column_config.TextColumn("Predicted", width="small"),
+                "Change": st.column_config.TextColumn("Change ($)", width="small"),
+                "Change %": st.column_config.TextColumn("Change (%)", width="small"),
+                "Direction": st.column_config.TextColumn("Direction", width="small"),
+            }
+        )
+    else:
+        st.info("No prediction history yet. Predictions will appear here.")
     st.subheader("📊 Price Trend & Forecast")
     
     fig, ax = plt.subplots(figsize=(14, 6))
@@ -196,62 +227,47 @@ try:
     plt.tight_layout()
     st.pyplot(fig, use_container_width=True)
     
-    # Info section
-    st.divider()
-    col1, col2 = st.columns(2)
+    # Candlestick Chart
+    st.subheader("🕯️ Candlestick Chart (Last 30 Days)")
     
-    with col1:
-        st.info(
-            f"""
-            **🧠 Model Architecture:**
-            - Type: 2-Layer LSTM Neural Network
-            - Layer 1: 50 LSTM units (ReLU activation)
-            - Layer 2: 50 LSTM units (ReLU activation)
-            - Output: Dense layer with 1 unit
-            - Sequence Length: {SEQUENCE_LENGTH} periods
-            - Training Data Points: {len(btc)}
-            """
-        )
+    # Create candlestick data from daily prices
+    daily_data = yf.download("BTC-USD", period="30d", interval="1d", progress=False)
     
-    with col2:
-        next_refresh = st.session_state.last_update + timedelta(minutes=5)
-        time_until_refresh = (next_refresh - datetime.now()).total_seconds()
+    if isinstance(daily_data, pd.DataFrame) and len(daily_data) > 0:
+        daily_data = daily_data[['Open', 'High', 'Low', 'Close']].copy()
         
-        st.success(
-            f"""
-            **✅ System Status:**
-            - Model Status: Active & Trained
-            - Data Source: Yahoo Finance
-            - Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-            - Next Auto-Refresh: {next_refresh.strftime('%H:%M:%S')}
-            - Time Until Refresh: {int(time_until_refresh)}s
-            """
-        )
-    
-    st.divider()
-    st.caption(
-        "⚠️ Disclaimer: This is a machine learning model for educational purposes only. "
-        "Bitcoin prices are volatile and unpredictable. Always conduct thorough research "
-        "before making investment decisions."
-    )
-
-except ValueError as e:
-    st.error(f"❌ Data Error: {e}")
-    st.warning(
-        "The system couldn't fetch enough Bitcoin data. This can happen if:\n"
-        "- Yahoo Finance API is temporarily unavailable\n"
-        "- Network connection issues\n"
-        "- Market data delays\n\n"
-        "**Solution:** Please wait a moment and refresh the page."
-    )
-
-except Exception as e:
-    logger.error(f"Unexpected error: {e}", exc_info=True)
-    st.error(f"❌ Unexpected Error: {str(e)}")
-    st.info(
-        "An unexpected error occurred. Please try one of the following:\n"
-        "1. Refresh the page\n"
-        "2. Clear browser cache (Ctrl+Shift+Delete)\n"
-        "3. Try again in a few minutes\n\n"
-        "If the problem persists, check your internet connection."
-    )
+        fig_candle, ax_candle = plt.subplots(figsize=(14, 6))
+        
+        # Color for candlesticks
+        colors = ['green' if daily_data['Close'].iloc[i] >= daily_data['Open'].iloc[i] 
+                  else 'red' for i in range(len(daily_data))]
+        
+        width = 0.6
+        width2 = 0.05
+        
+        x = np.arange(len(daily_data))
+        
+        # Draw high-low lines
+        for i in range(len(daily_data)):
+            ax_candle.plot([i, i], [daily_data['Low'].iloc[i], daily_data['High'].iloc[i]], 
+                          color=colors[i], linewidth=1.5)
+        
+        # Draw open-close rectangles
+        for i in range(len(daily_data)):
+            open_price = daily_data['Open'].iloc[i]
+            close_price = daily_data['Close'].iloc[i]
+            height = close_price - open_price
+            bottom = min(open_price, close_price)
+            
+            ax_candle.bar(i, height, width2, bottom=bottom, color=colors[i], edgecolor='black', linewidth=0.5)
+        
+        ax_candle.set_xticks(x[::3])
+        ax_candle.set_xticklabels([daily_data.index[i].strftime('%Y-%m-%d') for i in range(0, len(daily_data), 3)], rotation=45)
+        ax_candle.set_title("Bitcoin Candlestick Chart (Last 30 Days)", fontsize=14, fontweight="bold")
+        ax_candle.set_xlabel("Date", fontsize=12)
+        ax_candle.set_ylabel("Price (USD)", fontsize=12)
+        ax_candle.grid(True, alpha=0.3, linestyle="--")
+        ax_candle.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"${x:,.0f}"))
+        
+        plt.tight_layout()
+        st.pyplot(fig_candle, use_container_width=True)
